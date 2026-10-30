@@ -255,6 +255,11 @@ function renderToday(v) {
   const isToday = date === today();
   const notices = [];
 
+  if (isToday && !isInstalled()) {
+    notices.push(`<div class="card good"><h2>ホーム画面に置きましょう</h2>
+      <p class="small">アイコンから1回で開けるようになります。</p>
+      <button class="btn" data-install>ホーム画面に追加</button></div>`);
+  }
   if (isToday) {
     for (const dr of pendingMorningChecks()) {
       notices.push(`<div class="card notice"><h2>${jpDate(dr.date)}の飲み会、どうでしたか？</h2>
@@ -334,6 +339,7 @@ function renderToday(v) {
   );
   $$('[data-morning]', v).forEach((b) => b.addEventListener('click', () => openMorningCheck(b.dataset.morning)));
   $('[data-backup]', v)?.addEventListener('click', doBackup);
+  $('[data-install]', v)?.addEventListener('click', doInstall);
   $('[data-urge]', v).addEventListener('click', () => openUrge(date));
   $$('[data-go]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -1307,6 +1313,32 @@ function openSecretEntry(id) {
     await sealSecret();
     renderSecret();
   });
+}
+
+/* ========== ホーム画面に追加 ========== */
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  installPrompt = e;
+});
+window.addEventListener('appinstalled', () => {
+  installPrompt = null;
+  toast('ホーム画面に追加しました');
+  render();
+});
+const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+
+async function doInstall() {
+  if (installPrompt) {
+    installPrompt.prompt();
+    await installPrompt.userChoice;
+    installPrompt = null;
+    return;
+  }
+  openSheet('ホーム画面に追加', `
+    <p class="small">準備に少し時間がかかることがあります。30秒ほど待ってから、もう一度このボタンを押してください。</p>
+    <p class="small">それでも出ないときは、Chromeの右上「︙」のメニューに「アプリをインストール」か「ホーム画面に追加」が出ていないか見てください。</p>
+    <button class="btn wide" data-close>閉じる</button>`);
 }
 
 /* ========== 起動 ========== */
