@@ -1796,10 +1796,27 @@ async function doInstall() {
     installPrompt = null;
     return;
   }
-  openSheet('ホーム画面に追加', `
+  const sheet = openSheet('ホーム画面に追加', `
     <p class="small">準備に少し時間がかかることがあります。30秒ほど待ってから、もう一度このボタンを押してください。</p>
-    <p class="small">それでも出ないときは、Chromeの右上「︙」のメニューに「アプリをインストール」か「ホーム画面に追加」が出ていないか見てください。</p>
+    <p class="small">それでも出ないときは、この画面をスクリーンショットで送ってください。原因を調べます。</p>
+    <div class="card" id="diag"><p class="muted">確認しています…</p></div>
     <button class="btn wide" data-close>閉じる</button>`);
+  const ok = (b) => (b ? '○' : '×');
+  let manifest = false;
+  try {
+    const m = await (await fetch('manifest.webmanifest', { cache: 'no-store' })).json();
+    manifest = !!m.name;
+  } catch {}
+  const reg = await navigator.serviceWorker?.getRegistration?.().catch(() => null);
+  const ua = navigator.userAgent;
+  const chrome = (ua.match(/Chrome\/(\d+)/) || [])[1] || '不明';
+  $('#diag', sheet).innerHTML = `
+    <div class="small">Chromeの版：${esc(chrome)}</div>
+    <div class="small">設定ファイル：${ok(manifest)}</div>
+    <div class="small">電波なしで開く準備：${ok(reg)}${reg ? (navigator.serviceWorker.controller ? '' : '（再読み込みで完了）') : ''}</div>
+    <div class="small">追加の合図：${ok(installPrompt)}</div>
+    <div class="small">表示の形：${isInstalled() ? 'アプリ' : 'ブラウザ'}</div>
+    <div class="muted" style="word-break:break-all;margin-top:6px">${esc(ua)}</div>`;
 }
 
 /* ========== 起動 ========== */
