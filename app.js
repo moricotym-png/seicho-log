@@ -4,7 +4,7 @@
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'consults', 'treatments', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -49,6 +49,19 @@ const DEFAULTS = {
   readLogs: [],
   engLogs: [],
   words: [],
+  consults: [],
+  treatments: [
+    'ファイバーコア',
+    'セラミックアンレー',
+    'セラミッククラウン',
+    'インプラント（単冠）',
+    '抜歯即時インプラント（リカバリー）',
+    '再生療法',
+    'フルマウス',
+    '全顎矯正（ワイヤー）',
+    'マウスピース矯正',
+    '部分矯正',
+  ].map((name, i) => ({ id: 't' + i, name })),
   secret: null,
   settings: { lastBackup: null },
 };
@@ -240,7 +253,7 @@ $$('.tabs button').forEach((b) =>
 
 function render() {
   const v = $('#view');
-  ({ today: renderToday, drink: renderDrink, gym: renderGym, learn: renderLearn, review: renderReview })[tab](v);
+  ({ today: renderToday, drink: renderDrink, gym: renderGym, learn: renderLearn, consult: renderConsult, review: renderReview })[tab](v);
 }
 
 /* ========== 今日 ========== */
@@ -266,8 +279,13 @@ function renderToday(v) {
         <p class="small">翌朝のチェックをしておくと、あとで振り返りやすくなります。</p>
         <button class="btn" data-morning="${dr.id}">翌朝チェックをする</button></div>`);
     }
+    for (const c of followUps()) {
+      notices.push(`<div class="card notice"><h2>${jpDate(c.date)}に相談した方、その後どうなりましたか？</h2>
+        <p class="small">${esc(c.items.filter((i) => i.status === 'pending').map((i) => treatmentName(i)).join('、'))}</p>
+        <div class="row"><button class="btn" data-consult="${c.id}">結果を入れる</button><button class="btn ghost" data-later="${c.id}">まだ検討中</button></div></div>`);
+    }
     const last = S.settings.lastBackup || S.settings.firstUse;
-    const hasData = Object.keys(S.days).length > 0 || S.drinks.length > 0 || S.workouts.length > 0;
+    const hasData = Object.keys(S.days).length > 0 || S.drinks.length > 0 || S.workouts.length > 0 || S.consults.length > 0;
     if (hasData && (!last || (Date.now() - new Date(last).getTime()) / 864e5 >= 7)) {
       notices.push(`<div class="card notice"><h2>週1回のバックアップの日です</h2>
         <p class="small">「保存する」を押して、送り先にGoogleドライブを選んでください。</p>
@@ -340,6 +358,16 @@ function renderToday(v) {
   $$('[data-morning]', v).forEach((b) => b.addEventListener('click', () => openMorningCheck(b.dataset.morning)));
   $('[data-backup]', v)?.addEventListener('click', doBackup);
   $('[data-install]', v)?.addEventListener('click', doInstall);
+  $$('[data-consult]', v).forEach((b) => b.addEventListener('click', () => openConsult(b.dataset.consult)));
+  $$('[data-later]', v).forEach((b) =>
+    b.addEventListener('click', () => {
+      const c = S.consults.find((x) => x.id === b.dataset.later);
+      c.followAt = addDays(today(), 14);
+      save('consults');
+      toast('2週間後にまた聞きます');
+      render();
+    })
+  );
   $('[data-urge]', v).addEventListener('click', () => openUrge(date));
   $$('[data-go]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -1220,6 +1248,7 @@ function lockSecret() {
   secretKey = null;
   secretItems = null;
   if ($('.sheet.secret')) closeSheet();
+  if (tab === 'consult') render();
 }
 document.addEventListener('visibilitychange', () => document.hidden && lockSecret());
 
@@ -1228,6 +1257,34 @@ const title = $('#title');
 title.addEventListener('pointerdown', () => (pressTimer = setTimeout(openSecretGate, 900)));
 ['pointerup', 'pointerleave', 'pointercancel'].forEach((ev) => title.addEventListener(ev, () => clearTimeout(pressTimer)));
 title.addEventListener('contextmenu', (e) => e.preventDefault());
+
+async function setupPin(pin) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  secretKey = await deriveKey(pin, salt);
+  secretItems = [];
+  S.secret = { salt: b64(salt) };
+  await sealSecret();
+}
+async function unlockPin(pin) {
+  try {
+    secretKey = await deriveKey(pin, unb64(S.secret.salt));
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(S.secret.iv) }, secretKey, unb64(S.secret.ct));
+    secretItems = JSON.parse(new TextDecoder().decode(pt));
+    return true;
+  } catch {
+    secretKey = null;
+    return false;
+  }
+}
+async function encJSON(obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, secretKey, new TextEncoder().encode(JSON.stringify(obj)));
+  return { iv: b64(iv), ct: b64(ct) };
+}
+async function decJSON(enc) {
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(enc.iv) }, secretKey, unb64(enc.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
 
 function openSecretGate() {
   const first = !S.secret;
@@ -1242,20 +1299,9 @@ function openSecretGate() {
     if (p1.length < 4) return toast('4けた以上にしてください');
     if (first) {
       if (p1 !== $('#pin2', sheet).value) return toast('2回の入力が違います');
-      const salt = crypto.getRandomValues(new Uint8Array(16));
-      secretKey = await deriveKey(p1, salt);
-      secretItems = [];
-      S.secret = { salt: b64(salt) };
-      await sealSecret();
-    } else {
-      try {
-        secretKey = await deriveKey(p1, unb64(S.secret.salt));
-        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(S.secret.iv) }, secretKey, unb64(S.secret.ct));
-        secretItems = JSON.parse(new TextDecoder().decode(pt));
-      } catch {
-        secretKey = null;
-        return toast('違います');
-      }
+      await setupPin(p1);
+    } else if (!(await unlockPin(p1))) {
+      return toast('違います');
     }
     renderSecret();
   };
@@ -1313,6 +1359,392 @@ function openSecretEntry(id) {
     await sealSecret();
     renderSecret();
   });
+}
+
+/* ========== コンサルテーション ========== */
+// 患者さんの名前は入れない。金額は暗証番号から作った鍵で暗号化して保存する（単位は万円）。
+const AGES = ['10代以下', '20代', '30代', '40代', '50代', '60代', '70代以上'];
+const SEXES = ['女性', '男性'];
+const PATIENT = ['新患', '通院中'];
+const SOURCES = ['紹介', 'ホームページ', 'SNS', '通院中に提案', '看板・通りがかり', 'その他'];
+const TOOLS = ['口の中の写真', 'レントゲン・CT', '模型', 'シミュレーション', '症例写真', '見積書'];
+const REASONS = ['説明が分かりやすい', '症例写真', '見た目を良くしたい', '長持ちさせたい', '紹介者の安心感', '費用', '期間', '家族と相談', '痛み・不安', '時期を見て', '他院と比較'];
+const C_STATUS = [['won', '決まった'], ['pending', '検討中'], ['lost', '見送り']];
+let consultRange = 'month';
+
+const treatmentName = (it) => S.treatments.find((t) => t.id === it.tid)?.name || it.name;
+function consultOutcome(c) {
+  if (c.items.some((i) => i.status === 'won')) return 'won';
+  if (c.items.some((i) => i.status === 'pending')) return 'pending';
+  return 'lost';
+}
+// 検討中のまま2週間たった相談
+function followUps() {
+  const t = today();
+  return S.consults.filter((c) => c.items.some((i) => i.status === 'pending') && (c.followAt || addDays(c.date, 14)) <= t);
+}
+function consultFrom() {
+  const t = today();
+  if (consultRange === 'month') return t.slice(0, 8) + '01';
+  if (consultRange === '3m') {
+    const d = parseYmd(t);
+    d.setDate(1);
+    d.setMonth(d.getMonth() - 2);
+    return ymd(d);
+  }
+  return '0000-00-00';
+}
+const man = (n) => `${Math.round(n * 10) / 10}万円`;
+
+function multiHTML(name, options, selected = []) {
+  return `<div class="choices" data-multi="${name}">${options
+    .map((o) => `<button type="button" class="choice${selected.includes(o) ? ' on' : ''}" data-v="${esc(o)}">${esc(o)}</button>`)
+    .join('')}</div>`;
+}
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-multi] .choice');
+  if (b) b.classList.toggle('on');
+});
+const readMulti = (root, name) => $$(`[data-multi="${name}"] .choice.on`, root).map((b) => b.dataset.v);
+
+function pinRowHTML(px = 'cp') {
+  const first = !S.secret;
+  return `<div class="row">
+      <input type="password" inputmode="numeric" id="${px}1" class="grow" placeholder="${first ? '暗証番号を決める（4けた以上）' : '暗証番号'}" autocomplete="off">
+      ${first ? `<input type="password" inputmode="numeric" id="${px}2" class="grow" placeholder="もう一度" autocomplete="off">` : ''}
+      <button type="button" class="btn sm" id="${px}-ok">${first ? '決める' : '開く'}</button>
+    </div>
+    ${first ? '<p class="muted">金額はこの暗証番号で暗号化します。忘れると、金額は誰にも開けなくなります。</p>' : ''}`;
+}
+function bindPinRow(root, done, px = 'cp') {
+  const ok = $(`#${px}-ok`, root);
+  if (!ok) return;
+  ok.onclick = async () => {
+    const p = $(`#${px}1`, root).value;
+    if (p.length < 4) return toast('4けた以上にしてください');
+    if (!S.secret) {
+      if (p !== $(`#${px}2`, root).value) return toast('2回の入力が違います');
+      await setupPin(p);
+    } else if (!(await unlockPin(p))) {
+      return toast('違います');
+    }
+    done();
+  };
+}
+
+function renderConsult(v) {
+  const from = consultFrom();
+  const list = S.consults.filter((c) => c.date >= from);
+  const cnt = { won: 0, pending: 0, lost: 0 };
+  list.forEach((c) => cnt[consultOutcome(c)]++);
+  const per = {};
+  list.forEach((c) =>
+    c.items.forEach((i) => {
+      const n = treatmentName(i);
+      per[n] = per[n] || { won: 0, pending: 0, lost: 0, all: 0 };
+      per[n][i.status]++;
+      per[n].all++;
+    })
+  );
+  const reasons = {};
+  list.forEach((c) => (c.reasons || []).forEach((r) => (reasons[r] = (reasons[r] || 0) + 1)));
+  const sources = {};
+  list.forEach((c) => {
+    if (!c.source) return;
+    sources[c.source] = sources[c.source] || { all: 0, won: 0 };
+    sources[c.source].all++;
+    if (consultOutcome(c) === 'won') sources[c.source].won++;
+  });
+  const sorted = [...S.consults].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.created - a.created));
+  const td = 'style="text-align:center;padding:4px 2px"';
+
+  v.innerHTML = `
+    <div class="subtabs">${choicesHTML('crange', [['month', '今月'], ['3m', '3か月'], ['all', 'すべて']], consultRange)}</div>
+    <div class="card">
+      <h2>相談 <span>${list.length}件</span></h2>
+      <div class="stats">
+        <div class="stat"><div class="v">${cnt.won}件</div><div class="l">決まった</div></div>
+        <div class="stat"><div class="v">${cnt.pending}件</div><div class="l">検討中</div></div>
+        <div class="stat"><div class="v">${cnt.lost}件</div><div class="l">見送り</div></div>
+        <div class="stat"><div class="v">${list.length ? Math.round((cnt.won / list.length) * 100) : 0}%</div><div class="l">決まった割合</div></div>
+      </div>
+      <button class="btn wide" data-new style="margin-top:10px">＋ 相談を記録する</button>
+    </div>
+    <div class="card" id="money"><h2>金額 <span>🔒</span></h2>${secretKey ? '<p class="muted">計算しています…</p>' : pinRowHTML()}</div>
+    <div class="card"><h2>治療ごと</h2>
+      ${
+        Object.keys(per).length
+          ? `<table style="width:100%;font-size:14px;border-collapse:collapse">
+          <tr class="muted"><td></td><td ${td}>提案</td><td ${td}>決</td><td ${td}>検討</td><td ${td}>見送</td></tr>
+          ${Object.entries(per)
+            .sort((a, b) => b[1].all - a[1].all)
+            .map(([n, x]) => `<tr style="border-top:1px solid var(--line)"><td style="padding:6px 0">${esc(n)}</td><td ${td}>${x.all}</td><td ${td}><b>${x.won}</b></td><td ${td}>${x.pending}</td><td ${td}>${x.lost}</td></tr>`)
+            .join('')}</table>`
+          : '<p class="muted">まだ記録はありません。</p>'
+      }
+    </div>
+    ${
+      Object.keys(sources).length
+        ? `<div class="card"><h2>きっかけ</h2>${Object.entries(sources)
+            .sort((a, b) => b[1].all - a[1].all)
+            .map(([k, x]) => `<div class="row small" style="justify-content:space-between;padding:3px 0"><span>${esc(k)}</span><span>${x.all}件中 ${x.won}件 決まった</span></div>`)
+            .join('')}</div>`
+        : ''
+    }
+    ${
+      Object.keys(reasons).length
+        ? `<div class="card"><h2>決め手・見送りの理由</h2>${Object.entries(reasons)
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => `<div class="row small" style="justify-content:space-between;padding:3px 0"><span>${esc(k)}</span><span>${n}件</span></div>`)
+            .join('')}</div>`
+        : ''
+    }
+    <div class="card"><h2>これまでの相談 <button class="btn ghost sm" data-menu>治療メニューを編集</button></h2>
+      ${
+        sorted.length
+          ? sorted
+              .slice(0, 40)
+              .map((c) => {
+                const o = consultOutcome(c);
+                return `<div class="list-item" data-open="${c.id}"><div class="row" style="justify-content:space-between"><b>${jpDate(c.date)}</b><span>${C_STATUS.find((s) => s[0] === o)[1]}</span></div>
+                  <div class="meta">${esc([c.age, c.sex, c.patient].filter(Boolean).join('・'))}</div>
+                  <div class="meta">${esc(c.items.map((i) => `${treatmentName(i)}（${C_STATUS.find((s) => s[0] === i.status)[1]}）`).join('、'))}</div></div>`;
+              })
+              .join('')
+          : '<p class="muted">まだ記録はありません。</p>'
+      }
+    </div>`;
+
+  bindChoices(v, 'crange', (x) => {
+    consultRange = x || consultRange;
+    render();
+  });
+  $('[data-new]', v).onclick = () => openConsult(null);
+  $('[data-menu]', v).onclick = openTreatmentMenu;
+  $$('[data-open]', v).forEach((el) => (el.onclick = () => openConsult(el.dataset.open)));
+  bindPinRow(v, render);
+  if (secretKey) fillMoney($('#money', v), list);
+}
+
+async function fillMoney(box, list) {
+  let won = 0;
+  let pending = 0;
+  let proposed = 0;
+  let wonCount = 0;
+  for (const c of list) {
+    if (!c.enc) continue;
+    let a;
+    try {
+      a = await decJSON(c.enc);
+    } catch {
+      continue;
+    }
+    let w = 0;
+    c.items.forEach((i) => {
+      const y = Number(a[i.id]) || 0;
+      proposed += y;
+      if (i.status === 'won') w += y;
+      if (i.status === 'pending') pending += y;
+    });
+    won += w;
+    if (w) wonCount++;
+  }
+  box.innerHTML = `<h2>金額 <span>🔓</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="v">${man(won)}</div><div class="l">決まった合計</div></div>
+      <div class="stat"><div class="v">${man(pending)}</div><div class="l">検討中の合計</div></div>
+      <div class="stat"><div class="v">${man(proposed)}</div><div class="l">提案した合計</div></div>
+      <div class="stat"><div class="v">${wonCount ? man(won / wonCount) : '-'}</div><div class="l">決まった相談1件あたり</div></div>
+    </div>
+    <p class="muted">アプリを閉じると、また鍵がかかります。</p>`;
+}
+
+async function openConsult(id) {
+  const existing = id ? S.consults.find((c) => c.id === id) : null;
+  const c = existing
+    ? structuredClone(existing)
+    : { id: uid(), created: Date.now(), date: today(), age: null, sex: null, patient: null, source: null, complaint: '', items: [], tools: [], reasons: [], score: null, note: '', enc: null };
+  let amounts = {};
+  if (existing?.enc && secretKey) {
+    try {
+      amounts = await decJSON(existing.enc);
+    } catch {
+      amounts = {};
+    }
+  }
+  // 暗証番号を入れていないときに直した場合でも、前に入れた金額は消さない
+  const keepOldEnc = () => existing?.enc && !secretKey;
+
+  const draw = () => {
+    const unlocked = !!secretKey;
+    const sheet = openSheet(existing ? '相談の記録' : '相談を記録', `
+      <label class="field"><span>日付</span><input type="date" id="c-date" value="${c.date}"></label>
+      <h3>年代</h3>${choicesHTML('age', AGES.map((x) => [x, x]), c.age)}
+      <h3>性別</h3>${choicesHTML('sex', SEXES.map((x) => [x, x]), c.sex)}
+      <h3>新患・通院中</h3>${choicesHTML('patient', PATIENT.map((x) => [x, x]), c.patient)}
+      <h3>きっかけ</h3>${choicesHTML('source', SOURCES.map((x) => [x, x]), c.source)}
+      <label class="field"><span class="row" style="justify-content:space-between">相談の内容（主訴） ${voiceBtn('c-comp')}</span>
+        <textarea id="c-comp" placeholder="例：前歯の見た目が気になる、奥歯でかめない">${esc(c.complaint)}</textarea></label>
+
+      <div class="card">
+        <h2>提案した治療</h2>
+        ${c.items
+          .map(
+            (it, i) => `<div class="exercise">
+            <div class="row" style="justify-content:space-between"><b>${esc(treatmentName(it))}</b><button type="button" class="btn ghost sm" data-rmit="${i}">外す</button></div>
+            ${choicesHTML('st' + i, C_STATUS, it.status)}
+            ${unlocked ? `<div class="row" style="margin-top:6px">金額 <input type="number" inputmode="decimal" class="num" style="width:110px" data-amt="${it.id}" value="${esc(amounts[it.id] ?? '')}"> 万円</div>` : ''}
+          </div>`
+          )
+          .join('') || '<p class="muted">下から選んで追加してください（いくつでも）。</p>'}
+        <select id="c-add" style="margin-top:10px">
+          <option value="">＋ 治療を追加</option>
+          ${S.treatments.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join('')}
+          <option value="__new">（自分で入力）</option>
+        </select>
+        ${unlocked ? '' : `<h3>🔒 金額を入れるときは暗証番号</h3>${pinRowHTML('cs')}`}
+      </div>
+
+      <h3>説明に使ったもの</h3>${multiHTML('tools', TOOLS, c.tools)}
+      <h3>決め手・見送りの理由</h3>${multiHTML('reasons', REASONS, c.reasons)}
+      <h3>自分の説明の手ごたえ</h3>${choicesHTML('score', ['1', '2', '3', '4', '5'].map((x) => [x, x]), c.score)}
+      <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次に変えること） ${voiceBtn('c-note')}</span>
+        <textarea id="c-note">${esc(c.note)}</textarea></label>
+      <div class="row"><button class="btn grow" id="c-save">保存</button>${existing ? '<button class="btn ghost" id="c-del">削除</button>' : ''}</div>`);
+
+    const sync = () => {
+      c.date = $('#c-date', sheet).value || c.date;
+      c.age = picked(sheet, 'age');
+      c.sex = picked(sheet, 'sex');
+      c.patient = picked(sheet, 'patient');
+      c.source = picked(sheet, 'source');
+      c.complaint = $('#c-comp', sheet).value;
+      c.items.forEach((it, i) => (it.status = picked(sheet, 'st' + i) || 'pending'));
+      $$('[data-amt]', sheet).forEach((inp) => (amounts[inp.dataset.amt] = inp.value === '' ? '' : Number(inp.value)));
+      c.tools = readMulti(sheet, 'tools');
+      c.reasons = readMulti(sheet, 'reasons');
+      c.score = picked(sheet, 'score');
+      c.note = $('#c-note', sheet).value;
+    };
+    const redraw = () => {
+      sync();
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    };
+
+    ['age', 'sex', 'patient', 'source', 'score', ...c.items.map((_, i) => 'st' + i)].forEach((n) => bindChoices(sheet, n, () => {}));
+    $('#c-add', sheet).onchange = (e) => {
+      let tid = e.target.value;
+      if (!tid) return;
+      if (tid === '__new') {
+        const name = (prompt('治療の名前（メニューにも追加されます）') || '').trim();
+        if (!name) return (e.target.value = '');
+        tid = uid();
+        S.treatments.push({ id: tid, name });
+        save('treatments');
+      }
+      sync();
+      c.items.push({ id: uid(), tid, name: S.treatments.find((t) => t.id === tid).name, status: 'pending' });
+      redraw();
+    };
+    $$('[data-rmit]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          sync();
+          const [it] = c.items.splice(Number(b.dataset.rmit), 1);
+          delete amounts[it.id];
+          redraw();
+        })
+    );
+    bindPinRow(sheet, async () => {
+      if (existing?.enc) {
+        try {
+          amounts = { ...(await decJSON(existing.enc)), ...Object.fromEntries(Object.entries(amounts).filter(([, y]) => y !== '')) };
+        } catch {}
+      }
+      redraw();
+    }, 'cs');
+    $('#c-save', sheet).onclick = async () => {
+      sync();
+      if (!c.items.length) return toast('提案した治療を1つ以上選んでください');
+      const hasAmount = Object.values(amounts).some((y) => y !== '' && y != null);
+      if (secretKey) {
+        const clean = Object.fromEntries(c.items.map((it) => [it.id, amounts[it.id]]).filter(([, y]) => y !== '' && y != null));
+        c.enc = Object.keys(clean).length ? await encJSON(clean) : null;
+      } else if (hasAmount) {
+        return toast('鍵がかかりました。暗証番号を入れ直してから保存してください');
+      } else if (!keepOldEnc()) {
+        c.enc = null;
+      }
+      if (existing && c.items.some((i) => i.status === 'pending') && existing.items.some((i) => i.status !== 'pending')) c.followAt = null;
+      const i = S.consults.findIndex((x) => x.id === c.id);
+      if (i >= 0) S.consults[i] = c;
+      else S.consults.push(c);
+      await save('consults');
+      closeSheet();
+      toast(existing ? '直しました' : 'おつかれさまでした。記録しました');
+      render();
+    };
+    $('#c-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この相談の記録を消しますか？')) return;
+      S.consults = S.consults.filter((x) => x.id !== c.id);
+      save('consults');
+      closeSheet();
+      render();
+    });
+  };
+  draw();
+}
+
+function openTreatmentMenu() {
+  const sheet = openSheet('治療メニュー', `
+    <p class="muted">名前を直すと、これまでの記録の表示も変わります。消しても、これまでの記録は残ります。</p>
+    <div class="card" id="tm-list">
+      ${S.treatments
+        .map(
+          (t) => `<div class="row" style="margin:6px 0"><input type="text" class="grow" data-tm="${t.id}" value="${esc(t.name)}">
+          <button type="button" class="btn ghost sm" data-up="${t.id}">↑</button><button type="button" class="btn ghost sm" data-tmdel="${t.id}">✕</button></div>`
+        )
+        .join('')}
+    </div>
+    <div class="row"><input type="text" id="tm-new" class="grow" placeholder="新しい治療の名前"><button class="btn sub sm" id="tm-add">追加</button></div>
+    <button class="btn wide" id="tm-save" style="margin-top:12px">保存</button>`);
+  const syncNames = () =>
+    $$('[data-tm]', sheet).forEach((inp) => {
+      const t = S.treatments.find((x) => x.id === inp.dataset.tm);
+      if (t && inp.value.trim()) t.name = inp.value.trim();
+    });
+  sheet.addEventListener('click', (e) => {
+    const up = e.target.dataset.up;
+    const del = e.target.dataset.tmdel;
+    if (!up && !del) return;
+    syncNames();
+    const i = S.treatments.findIndex((x) => x.id === (up || del));
+    if (del) {
+      if (!confirm(`「${S.treatments[i].name}」をメニューから消しますか？`)) return;
+      S.treatments.splice(i, 1);
+    } else if (i > 0) {
+      [S.treatments[i - 1], S.treatments[i]] = [S.treatments[i], S.treatments[i - 1]];
+    }
+    save('treatments');
+    openTreatmentMenu();
+  });
+  $('#tm-add', sheet).onclick = () => {
+    const name = $('#tm-new', sheet).value.trim();
+    if (!name) return;
+    syncNames();
+    S.treatments.push({ id: uid(), name });
+    save('treatments');
+    openTreatmentMenu();
+  };
+  $('#tm-save', sheet).onclick = () => {
+    syncNames();
+    save('treatments');
+    closeSheet();
+    toast('メニューを保存しました');
+    render();
+  };
 }
 
 /* ========== ホーム画面に追加 ========== */
