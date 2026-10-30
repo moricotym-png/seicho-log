@@ -4,7 +4,7 @@
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'consults', 'treatments', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'consults', 'treatments', 'labs', 'labTypes', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -62,6 +62,13 @@ const DEFAULTS = {
     'マウスピース矯正',
     '部分矯正',
   ].map((name, i) => ({ id: 't' + i, name })),
+  labs: [],
+  labTypes: [
+    { id: 'l0', name: 'プリント模型', steps: ['プリント', '仕上げ'] },
+    { id: 'l1', name: '保定装置', steps: ['設計', 'プリント', '仕上げ'] },
+    { id: 'l2', name: 'マウスピース矯正のマウスピース', steps: ['設計', 'プリント', '仕上げ'] },
+    { id: 'l3', name: 'サージカルステント', steps: ['設計', 'プリント', '仕上げ'] },
+  ],
   secret: null,
   settings: { lastBackup: null },
 };
@@ -253,7 +260,7 @@ $$('.tabs button').forEach((b) =>
 
 function render() {
   const v = $('#view');
-  ({ today: renderToday, drink: renderDrink, gym: renderGym, learn: renderLearn, consult: renderConsult, review: renderReview })[tab](v);
+  ({ today: renderToday, drink: renderDrink, gym: renderGym, learn: renderLearn, consult: renderWork, review: renderReview })[tab](v);
 }
 
 /* ========== 今日 ========== */
@@ -279,13 +286,25 @@ function renderToday(v) {
         <p class="small">翌朝のチェックをしておくと、あとで振り返りやすくなります。</p>
         <button class="btn" data-morning="${dr.id}">翌朝チェックをする</button></div>`);
     }
+    const run = labRunning();
+    if (run) {
+      notices.push(`<div class="card good"><h2>技工の作業中：${esc(labTypeName(run))} <span>${minutesLabel(runningMin(run))}</span></h2>
+        <button class="btn" data-labstop>止める</button></div>`);
+    }
+    const waiting = S.labs.filter((j) => labState(j) === 'waiting');
+    if (waiting.length) {
+      const oldest = Math.max(...waiting.map((j) => daysBetween(j.ordered, today())));
+      notices.push(`<div class="card${oldest >= LAB_LATE ? ' notice' : ''}"><h2>未着手の技工 ${waiting.length}件</h2>
+        <p class="small">いちばん古いものは受注から${oldest}日です。${oldest >= LAB_LATE ? 'まず1件だけ、手をつけてみましょう。' : ''}</p>
+        <button class="btn sub" data-golab>技工を見る</button></div>`);
+    }
     for (const c of followUps()) {
       notices.push(`<div class="card notice"><h2>${jpDate(c.date)}に相談した方、その後どうなりましたか？</h2>
         <p class="small">${esc(c.items.filter((i) => i.status === 'pending').map((i) => treatmentName(i)).join('、'))}</p>
         <div class="row"><button class="btn" data-consult="${c.id}">結果を入れる</button><button class="btn ghost" data-later="${c.id}">まだ検討中</button></div></div>`);
     }
     const last = S.settings.lastBackup || S.settings.firstUse;
-    const hasData = Object.keys(S.days).length > 0 || S.drinks.length > 0 || S.workouts.length > 0 || S.consults.length > 0;
+    const hasData = Object.keys(S.days).length > 0 || S.drinks.length > 0 || S.workouts.length > 0 || S.consults.length > 0 || S.labs.length > 0;
     if (hasData && (!last || (Date.now() - new Date(last).getTime()) / 864e5 >= 7)) {
       notices.push(`<div class="card notice"><h2>週1回のバックアップの日です</h2>
         <p class="small">「保存する」を押して、送り先にGoogleドライブを選んでください。</p>
@@ -366,6 +385,14 @@ function renderToday(v) {
   $$('[data-morning]', v).forEach((b) => b.addEventListener('click', () => openMorningCheck(b.dataset.morning)));
   $('[data-backup]', v)?.addEventListener('click', doBackup);
   $('[data-install]', v)?.addEventListener('click', doInstall);
+  $('[data-labstop]', v)?.addEventListener('click', () => {
+    stopLabTimer(labRunning());
+    render();
+  });
+  $('[data-golab]', v)?.addEventListener('click', () => {
+    workTab = 'lab';
+    $('.tabs [data-tab="consult"]').click();
+  });
   $$('[data-consult]', v).forEach((b) => b.addEventListener('click', () => openConsult(b.dataset.consult)));
   $$('[data-later]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -1772,6 +1799,356 @@ function openTreatmentMenu() {
     save('treatments');
     closeSheet();
     toast('メニューを保存しました');
+    render();
+  };
+}
+
+/* ========== 仕事（相談・院内技工） ========== */
+let workTab = 'consult';
+function renderWork(v) {
+  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工']], workTab)}</div><div id="work-body"></div>`;
+  bindChoices(v, 'work', (x) => {
+    workTab = x || workTab;
+    render();
+  });
+  const body = $('#work-body', v);
+  if (workTab === 'lab') renderLab(body);
+  else renderConsult(body);
+}
+
+/* ========== 院内技工 ========== */
+// 受注 → 着手 → 作業 → 完成 を記録して、ためている件数と日数を見えるようにする。患者さんの名前は入れない。
+const LAB_LATE = 3; // 受注からこの日数たっても未着手なら「先送り」として目立たせる
+const daysBetween = (a, b) => Math.round((parseYmd(b) - parseYmd(a)) / 864e5);
+const labType = (j) => S.labTypes.find((t) => t.id === j.typeId);
+const labTypeName = (j) => labType(j)?.name || j.typeName;
+const labMinutes = (j) => (j.sessions || []).reduce((a, s) => a + (s.min || 0), 0);
+function labState(j) {
+  if (j.finished) return 'done';
+  if (j.started) return 'doing';
+  return 'waiting';
+}
+const labRunning = () => S.labs.find((j) => j.running);
+function runningMin(j) {
+  return Math.max(0, Math.round((Date.now() - j.running) / 60000));
+}
+
+function labStats(list) {
+  const done = list.filter((j) => j.finished);
+  const avg = (arr) => (arr.length ? Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10 : null);
+  return {
+    n: done.length,
+    toStart: avg(done.map((j) => daysBetween(j.ordered, j.started))),
+    toFinish: avg(done.map((j) => daysBetween(j.ordered, j.finished))),
+    work: avg(done.map(labMinutes).filter(Boolean)),
+    late: done.filter((j) => daysBetween(j.ordered, j.started) >= LAB_LATE).length,
+  };
+}
+
+let labTimer = null;
+function renderLab(v) {
+  const t = today();
+  const waiting = S.labs.filter((j) => labState(j) === 'waiting').sort((a, b) => (a.ordered < b.ordered ? -1 : 1));
+  const doing = S.labs.filter((j) => labState(j) === 'doing').sort((a, b) => (a.ordered < b.ordered ? -1 : 1));
+  const done = S.labs.filter((j) => j.finished).sort((a, b) => (a.finished < b.finished ? 1 : -1));
+  const monthDone = done.filter((j) => monthKey(j.finished) === monthKey(t));
+  const st = labStats(monthDone);
+  const run = labRunning();
+  const lateNow = waiting.filter((j) => daysBetween(j.ordered, t) >= LAB_LATE).length;
+
+  const jobRow = (j) => {
+    const age = daysBetween(j.ordered, t);
+    const stepsDone = j.steps.filter((s) => s.done).length;
+    const due = j.due ? `・使う日 ${jpDate(j.due)}${j.due < t ? '（過ぎています）' : j.due === t ? '（今日）' : ''}` : '';
+    let right;
+    if (j.finished) right = `${daysBetween(j.ordered, j.finished)}日で完成`;
+    else if (j.started) right = `${stepsDone}/${j.steps.length} 工程`;
+    else right = `<span style="color:${age >= LAB_LATE ? 'var(--warn)' : 'inherit'};font-weight:700">受注から${age}日</span>`;
+    const sub = j.finished
+      ? `着手まで${daysBetween(j.ordered, j.started)}日・作業${minutesLabel(labMinutes(j))}`
+      : `${jpDate(j.ordered)}受注${due}${labMinutes(j) ? `・作業${minutesLabel(labMinutes(j))}` : ''}`;
+    return `<div class="list-item" data-job="${j.id}"><div class="row" style="justify-content:space-between"><b>${esc(labTypeName(j))}${j.mark ? ` <span class="muted">${esc(j.mark)}</span>` : ''}</b><span class="small">${right}</span></div>
+      <div class="meta">${sub}</div></div>`;
+  };
+
+  v.innerHTML = `
+    ${
+      run
+        ? `<div class="card good"><h2>作業中：${esc(labTypeName(run))} <span>${minutesLabel(runningMin(run))}</span></h2>
+        <div class="row"><button class="btn grow" data-stop="${run.id}">止める</button><button class="btn sub" data-job="${run.id}">開く</button></div></div>`
+        : ''
+    }
+    <div class="card">
+      <h2>院内技工</h2>
+      <div class="stats">
+        <div class="stat"><div class="v" style="color:${lateNow ? 'var(--warn)' : 'inherit'}">${waiting.length}件</div><div class="l">未着手${lateNow ? `（うち${LAB_LATE}日以上 ${lateNow}件）` : ''}</div></div>
+        <div class="stat"><div class="v">${doing.length}件</div><div class="l">作業中</div></div>
+      </div>
+      <button class="btn wide" data-new style="margin-top:10px">＋ 受注を記録する</button>
+    </div>
+    <div class="card"><h2>未着手 <span class="muted">古い順</span></h2>${waiting.map(jobRow).join('') || '<p class="muted">ためている技工はありません。すばらしい！</p>'}</div>
+    ${doing.length ? `<div class="card"><h2>作業中</h2>${doing.map(jobRow).join('')}</div>` : ''}
+    <div class="card">
+      <h2>今月の完成 <span>${st.n}件</span></h2>
+      <div class="stats">
+        <div class="stat"><div class="v">${st.toStart ?? '-'}日</div><div class="l">受注から着手まで（平均）</div></div>
+        <div class="stat"><div class="v">${st.toFinish ?? '-'}日</div><div class="l">受注から完成まで（平均）</div></div>
+        <div class="stat"><div class="v">${st.work != null ? minutesLabel(Math.round(st.work)) : '-'}</div><div class="l">作業時間（平均）</div></div>
+        <div class="stat"><div class="v">${st.late}件</div><div class="l">${LAB_LATE}日以上 先送りした</div></div>
+      </div>
+    </div>
+    ${labTypeTable()}
+    <div class="card"><h2>完成した技工 <button class="btn ghost sm" data-types>種類を編集</button></h2>${done.slice(0, 20).map(jobRow).join('') || '<p class="muted">まだありません。</p>'}</div>`;
+
+  $('[data-new]', v).onclick = () => openLabJob(null);
+  $('[data-types]', v).onclick = openLabTypes;
+  $$('[data-job]', v).forEach((el) => (el.onclick = () => openLabJob(el.dataset.job)));
+  $$('[data-stop]', v).forEach((el) =>
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      stopLabTimer(S.labs.find((j) => j.id === el.dataset.stop));
+      render();
+    })
+  );
+  // 計測中は1分ごとに表示を進める
+  clearInterval(labTimer);
+  if (run)
+    labTimer = setInterval(() => {
+      if (tab === 'consult' && workTab === 'lab' && !$('.sheet-bg')) render();
+      else if (!labRunning()) clearInterval(labTimer);
+    }, 60000);
+}
+
+// 種類ごとの平均（これまでの完成分すべて）
+function labTypeTable() {
+  const rows = S.labTypes
+    .map((t) => [t.name, labStats(S.labs.filter((j) => j.finished && j.typeId === t.id))])
+    .filter(([, s]) => s.n);
+  if (!rows.length) return '';
+  const td = 'style="text-align:center;padding:4px 2px"';
+  return `<div class="card"><h2>種類ごと（これまで）</h2>
+    <table style="width:100%;font-size:13px;border-collapse:collapse">
+      <tr class="muted"><td></td><td ${td}>件数</td><td ${td}>着手まで</td><td ${td}>作業</td><td ${td}>完成まで</td></tr>
+      ${rows
+        .map(
+          ([n, s]) => `<tr style="border-top:1px solid var(--line)"><td style="padding:6px 0">${esc(n)}</td><td ${td}>${s.n}</td><td ${td}>${s.toStart}日</td><td ${td}>${s.work != null ? minutesLabel(Math.round(s.work)) : '-'}</td><td ${td}>${s.toFinish}日</td></tr>`
+        )
+        .join('')}
+    </table></div>`;
+}
+
+function markStarted(j, date) {
+  if (!j.started || date < j.started) j.started = date;
+}
+function startLabTimer(j) {
+  const other = labRunning();
+  if (other && other.id !== j.id) stopLabTimer(other);
+  j.running = Date.now();
+  markStarted(j, today());
+  save('labs');
+}
+function stopLabTimer(j) {
+  if (!j?.running) return;
+  const min = Math.max(1, runningMin(j));
+  j.sessions = j.sessions || [];
+  j.sessions.push({ date: ymd(new Date(j.running)), min });
+  j.running = null;
+  save('labs');
+  toast(`${minutesLabel(min)}作業しました`);
+}
+
+function openLabJob(id) {
+  const existing = id ? S.labs.find((j) => j.id === id) : null;
+  if (!existing && !S.labTypes.length) return toast('先に技工の種類を登録してください');
+  const j = existing || { id: uid(), created: Date.now(), typeId: S.labTypes[0].id, typeName: S.labTypes[0].name, ordered: today(), due: '', mark: '', note: '', steps: S.labTypes[0].steps.map((name) => ({ name, done: false })), sessions: [], started: null, finished: null, running: null };
+  const isNew = !existing;
+
+  const draw = () => {
+    const t = today();
+    const sheet = openSheet(isNew ? '受注を記録' : esc(labTypeName(j)), `
+      <h3>種類</h3>${choicesHTML('ltype', S.labTypes.map((x) => [x.id, x.name]), j.typeId)}
+      <div class="row">
+        <label class="field grow"><span>受注日</span><input type="date" id="l-ord" value="${j.ordered}"></label>
+        <label class="field grow"><span>使う日（装着・手術など。任意）</span><input type="date" id="l-due" value="${esc(j.due || '')}"></label>
+      </div>
+      <label class="field"><span>目印（部位やカルテ番号の下2けたなど。名前は入れない）</span><input type="text" id="l-mark" value="${esc(j.mark)}"></label>
+      ${
+        isNew
+          ? ''
+          : `<div class="card">
+        <h2>作業時間 <span>${minutesLabel(labMinutes(j) + (j.running ? runningMin(j) : 0))}</span></h2>
+        ${
+          j.running
+            ? `<p class="small">計測中（${minutesLabel(runningMin(j))}）。アプリを閉じても計測は続きます。</p><button class="btn warn wide" id="l-stop">止める</button>`
+            : `<button class="btn wide" id="l-start">▶ 作業を始める（時間を計る）</button>`
+        }
+        <div class="row" style="margin-top:8px"><span class="small">計り忘れたとき：</span>${[10, 15, 30, 60].map((m) => `<button type="button" class="btn ghost sm" data-addmin="${m}">＋${m}分</button>`).join('')}</div>
+        ${(j.sessions || []).length ? `<p class="muted" style="margin:6px 0 0">${j.sessions.map((s) => `${jpDate(s.date)} ${s.min}分`).join('、')}</p>` : ''}
+      </div>
+      <div class="card"><h2>工程</h2>
+        ${j.steps.map((s, i) => `<label class="check"><input type="checkbox" data-step="${i}" ${s.done ? 'checked' : ''}> ${esc(s.name)}${s.doneAt ? ` <span class="muted">${jpDate(s.doneAt)}</span>` : ''}</label>`).join('')}
+      </div>
+      <p class="small">${
+        j.finished
+          ? `受注から着手まで${daysBetween(j.ordered, j.started)}日、完成まで${daysBetween(j.ordered, j.finished)}日でした。`
+          : j.started
+            ? `${jpDate(j.started)}に着手（受注から${daysBetween(j.ordered, j.started)}日）`
+            : `受注から${daysBetween(j.ordered, t)}日、まだ着手していません。`
+      }</p>`
+      }
+      <label class="field"><span class="row" style="justify-content:space-between">メモ ${voiceBtn('l-note')}</span><textarea id="l-note">${esc(j.note)}</textarea></label>
+      <div class="row">
+        <button class="btn grow" id="l-save">${isNew ? '記録' : '保存'}</button>
+        ${isNew ? '' : j.finished ? '<button class="btn sub" id="l-reopen">完成を取り消す</button>' : '<button class="btn sub" id="l-done">完成！</button>'}
+        ${isNew ? '' : '<button class="btn ghost" id="l-del">削除</button>'}
+      </div>`);
+
+    const sync = () => {
+      const tid = picked(sheet, 'ltype') || j.typeId;
+      if (tid !== j.typeId && !j.steps.some((s) => s.done)) {
+        const tp = S.labTypes.find((x) => x.id === tid);
+        j.steps = tp.steps.map((name) => ({ name, done: false }));
+      }
+      j.typeId = tid;
+      j.typeName = S.labTypes.find((x) => x.id === tid)?.name || j.typeName;
+      j.ordered = $('#l-ord', sheet).value || j.ordered;
+      j.due = $('#l-due', sheet).value;
+      j.mark = $('#l-mark', sheet).value;
+      j.note = $('#l-note', sheet).value;
+    };
+    const commit = () => {
+      sync();
+      if (!S.labs.includes(j)) S.labs.push(j);
+      save('labs');
+    };
+    const redraw = () => {
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    };
+    bindChoices(sheet, 'ltype', () => {});
+    $('#l-start', sheet)?.addEventListener('click', () => {
+      commit();
+      startLabTimer(j);
+      closeSheet();
+      toast('計測を始めました。終わったら「止める」を押してください');
+      render();
+    });
+    $('#l-stop', sheet)?.addEventListener('click', () => {
+      commit();
+      stopLabTimer(j);
+      redraw();
+    });
+    $$('[data-addmin]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          commit();
+          j.sessions.push({ date: today(), min: Number(b.dataset.addmin) });
+          markStarted(j, today());
+          save('labs');
+          redraw();
+        })
+    );
+    $$('[data-step]', sheet).forEach((c) =>
+      c.addEventListener('change', () => {
+        commit();
+        const s = j.steps[Number(c.dataset.step)];
+        s.done = c.checked;
+        s.doneAt = c.checked ? today() : null;
+        if (c.checked) markStarted(j, today());
+        if (j.steps.every((x) => x.done) && !j.finished) {
+          finishJob(j);
+          return;
+        }
+        save('labs');
+        redraw();
+      })
+    );
+    $('#l-save', sheet).onclick = () => {
+      commit();
+      closeSheet();
+      toast(isNew ? '受注を記録しました。早めに着手しましょう' : '保存しました');
+      render();
+    };
+    $('#l-done', sheet)?.addEventListener('click', () => {
+      commit();
+      finishJob(j);
+    });
+    $('#l-reopen', sheet)?.addEventListener('click', () => {
+      commit();
+      j.finished = null;
+      save('labs');
+      redraw();
+    });
+    $('#l-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この技工の記録を消しますか？')) return;
+      S.labs = S.labs.filter((x) => x.id !== j.id);
+      save('labs');
+      closeSheet();
+      render();
+    });
+  };
+  draw();
+}
+
+function finishJob(j) {
+  if (j.running) stopLabTimer(j);
+  const t = today();
+  j.steps.forEach((s) => {
+    if (!s.done) {
+      s.done = true;
+      s.doneAt = t;
+    }
+  });
+  markStarted(j, t);
+  j.finished = t;
+  save('labs');
+  closeSheet();
+  const d = daysBetween(j.ordered, j.finished);
+  toast(d <= 1 ? `受注から${d}日で完成！すばやいです` : `完成！受注から${d}日でした`);
+  render();
+}
+
+function openLabTypes() {
+  const sheet = openSheet('技工の種類', `
+    <p class="muted">工程は「、」で区切って入れます。例：設計、プリント、仕上げ</p>
+    ${S.labTypes
+      .map(
+        (t) => `<div class="card" style="padding:10px">
+        <div class="row"><input type="text" class="grow" data-tn="${t.id}" value="${esc(t.name)}"><button type="button" class="btn ghost sm" data-tdel="${t.id}">✕</button></div>
+        <input type="text" data-ts="${t.id}" value="${esc(t.steps.join('、'))}" style="margin-top:6px"></div>`
+      )
+      .join('')}
+    <div class="card" style="padding:10px"><input type="text" id="tn-new" placeholder="新しい種類の名前"><input type="text" id="ts-new" placeholder="工程（例：設計、プリント、仕上げ）" style="margin-top:6px"></div>
+    <button class="btn wide" id="t-save">保存</button>
+    <p class="muted">これまでの記録の工程は変わりません。</p>`);
+  const splitSteps = (s) => s.split(/[、,，\s]+/).map((x) => x.trim()).filter(Boolean);
+  const syncAll = () => {
+    S.labTypes.forEach((t) => {
+      const n = $(`[data-tn="${t.id}"]`, sheet)?.value.trim();
+      const st = splitSteps($(`[data-ts="${t.id}"]`, sheet)?.value || '');
+      if (n) t.name = n;
+      if (st.length) t.steps = st;
+    });
+    const nn = $('#tn-new', sheet).value.trim();
+    if (nn) S.labTypes.push({ id: uid(), name: nn, steps: splitSteps($('#ts-new', sheet).value).length ? splitSteps($('#ts-new', sheet).value) : ['作業'] });
+  };
+  $$('[data-tdel]', sheet).forEach(
+    (b) =>
+      (b.onclick = () => {
+        const t = S.labTypes.find((x) => x.id === b.dataset.tdel);
+        if (!confirm(`「${t.name}」を消しますか？（これまでの記録は残ります）`)) return;
+        syncAll();
+        S.labTypes = S.labTypes.filter((x) => x.id !== t.id);
+        save('labTypes');
+        openLabTypes();
+      })
+  );
+  $('#t-save', sheet).onclick = () => {
+    syncAll();
+    save('labTypes');
+    closeSheet();
+    toast('保存しました');
     render();
   };
 }
