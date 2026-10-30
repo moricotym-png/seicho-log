@@ -4,7 +4,7 @@
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'consults', 'treatments', 'labs', 'labTypes', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -69,6 +69,9 @@ const DEFAULTS = {
     { id: 'l2', name: 'マウスピース矯正のマウスピース', steps: ['設計', 'プリント', '仕上げ'] },
     { id: 'l3', name: 'サージカルステント', steps: ['設計', 'プリント', '仕上げ'] },
   ],
+  cases: [],
+  notes: [],
+  noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null },
 };
@@ -298,6 +301,11 @@ function renderToday(v) {
         <p class="small">いちばん古いものは受注から${oldest}日です。${oldest >= LAB_LATE ? 'まず1件だけ、手をつけてみましょう。' : ''}</p>
         <button class="btn sub" data-golab>技工を見る</button></div>`);
     }
+    for (const k of caseFollowUps()) {
+      notices.push(`<div class="card"><h2>経過を見る日：${esc(k.area)}${k.mark ? ` ${esc(k.mark)}` : ''}</h2>
+        <p class="small">${jpDate(k.date)}の症例です。${esc(k.procedure || '')}</p>
+        <button class="btn sub" data-case="${k.id}">経過を追記する</button></div>`);
+    }
     for (const c of followUps()) {
       notices.push(`<div class="card notice"><h2>${jpDate(c.date)}に相談した方、その後どうなりましたか？</h2>
         <p class="small">${esc(c.items.filter((i) => i.status === 'pending').map((i) => treatmentName(i)).join('、'))}</p>
@@ -393,6 +401,7 @@ function renderToday(v) {
     workTab = 'lab';
     $('.tabs [data-tab="consult"]').click();
   });
+  $$('[data-case]', v).forEach((b) => b.addEventListener('click', () => openCase(b.dataset.case)));
   $$('[data-consult]', v).forEach((b) => b.addEventListener('click', () => openConsult(b.dataset.consult)));
   $$('[data-later]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -1806,13 +1815,14 @@ function openTreatmentMenu() {
 /* ========== 仕事（相談・院内技工） ========== */
 let workTab = 'consult';
 function renderWork(v) {
-  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工']], workTab)}</div><div id="work-body"></div>`;
+  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート']], workTab)}</div><div id="work-body"></div>`;
   bindChoices(v, 'work', (x) => {
     workTab = x || workTab;
     render();
   });
   const body = $('#work-body', v);
   if (workTab === 'lab') renderLab(body);
+  else if (workTab === 'clinic') renderClinic(body);
   else renderConsult(body);
 }
 
@@ -2149,6 +2159,266 @@ function openLabTypes() {
     save('labTypes');
     closeSheet();
     toast('保存しました');
+    render();
+  };
+}
+
+/* ========== 臨床ノート ========== */
+// 症例（術前診断 → 術式 → 結果 → 振り返り → 経過）と、日々の気づき・トラブル対処を貯める。患者さんの名前は入れない。
+const CASE_AREAS = ['歯周', 'インプラント', '根管', '補綴・修復', '矯正', '外科', 'その他'];
+// 分野ごとの診断項目（国際的な分類に合わせる。どれも任意）
+const DIAG = {
+  歯周: [
+    ['ステージ（2017 AAP/EFP）', ['I', 'II', 'III', 'IV']],
+    ['グレード', ['A', 'B', 'C']],
+    ['範囲', ['限局型', '広汎型', '臼歯・切歯型']],
+    ['分岐部（Hamp）', ['なし', '1度', '2度', '3度']],
+    ['骨欠損の形態', ['水平性', '1壁性', '2壁性', '3壁性', '複合型', 'クレーター状']],
+    ['歯肉退縮（Cairo）', ['なし', 'RT1', 'RT2', 'RT3']],
+  ],
+  インプラント: [
+    ['埋入のタイミング（ITI）', ['Type 1 即時', 'Type 2 早期（軟組織治癒）', 'Type 3 早期（部分的な骨治癒）', 'Type 4 遅延']],
+    ['抜歯窩（Elian）', ['Type I', 'Type II', 'Type III']],
+    ['骨量（Lekholm & Zarb）', ['A', 'B', 'C', 'D', 'E']],
+    ['骨質（Lekholm & Zarb）', ['1', '2', '3', '4']],
+    ['骨造成', ['なし', 'GBR 同時', 'GBR 段階', 'サイナス（ラテラル）', 'サイナス（クレスタル）', 'ソケットプリザベーション']],
+    ['軟組織の処置', ['なし', 'CTG', 'FGG', 'その他']],
+    ['荷重', ['即時', '早期', '通常']],
+    ['難易度（ITI SAC）', ['S', 'A', 'C']],
+  ],
+  根管: [
+    ['歯髄の診断（AAE）', ['正常', '可逆性歯髄炎', '不可逆性歯髄炎（症状あり）', '不可逆性歯髄炎（症状なし）', '歯髄壊死', '根管治療済み', '治療開始済み']],
+    ['根尖の診断（AAE）', ['正常', '症状のある根尖性歯周炎', '症状のない根尖性歯周炎', '急性根尖膿瘍', '慢性根尖膿瘍', '硬化性骨炎']],
+    ['難易度（AAE）', ['低', '中', '高']],
+  ],
+  '補綴・修復': [],
+  矯正: [],
+  外科: [],
+  その他: [],
+};
+const CASE_RESULTS = [['good', '予定どおり'], ['partial', '一部課題あり'], ['bad', 'うまくいかなかった']];
+let clinicTab = 'cases';
+let clinicQuery = '';
+
+function caseFollowUps() {
+  const t = today();
+  return S.cases.filter((c) => c.nextCheck && c.nextCheck <= t);
+}
+
+function renderClinic(v) {
+  const q = clinicQuery.trim().toLowerCase();
+  const hit = (obj) => !q || JSON.stringify(obj).toLowerCase().includes(q);
+  const cases = S.cases.filter(hit).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const notes = S.notes.filter(hit).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const count = (list, key) => {
+    const m = {};
+    list.forEach((x) => (m[x[key]] = (m[x[key]] || 0) + 1));
+    return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(k)} ${n}`).join('・');
+  };
+  const resLabel = (r) => CASE_RESULTS.find((x) => x[0] === r)?.[1] || '';
+
+  v.innerHTML = `
+    <input type="text" id="cl-q" placeholder="🔍 探す（例：分岐部、ファイル、スクリュー）" value="${esc(clinicQuery)}" style="margin-bottom:10px">
+    <div class="subtabs">${choicesHTML('cltab', [['cases', `症例 ${cases.length}`], ['notes', `気づき・トラブル ${notes.length}`]], clinicTab)}</div>
+    ${
+      clinicTab === 'cases'
+        ? `<div class="card"><button class="btn wide" data-newcase>＋ 症例を記録する</button>
+            <p class="muted" style="margin:8px 0 0">${count(S.cases, 'area') || '術前の診断・術式・結果・課題を残していきます。'}</p></div>
+          <div class="card">${
+            cases
+              .map(
+                (c) => `<div class="list-item" data-case="${c.id}"><div class="row" style="justify-content:space-between"><b>${esc(c.area)}${c.mark ? ` ${esc(c.mark)}` : ''}</b><span class="small">${jpDate(c.date)}</span></div>
+              <div class="meta">${esc(c.procedure || '')}</div>
+              <div class="meta">${esc(resLabel(c.result))}${c.next ? ` ・次は：${esc(c.next)}` : ''}</div></div>`
+              )
+              .join('') || '<p class="muted">なし</p>'
+          }</div>`
+        : `<div class="card"><button class="btn wide" data-newnote>＋ 気づき・トラブルを記録する</button>
+            <p class="muted" style="margin:8px 0 0">${count(S.notes, 'cat') || '同じ失敗や苦労をくり返さないために、対処の手順を残します。'}</p></div>
+          <div class="card">${
+            notes
+              .map(
+                (n) => `<div class="list-item" data-note="${n.id}"><div class="row" style="justify-content:space-between"><b>${esc(n.title || n.cat)}</b><span class="small">${jpDate(n.date)}</span></div>
+              <div class="meta">${esc(n.cat)}</div>${n.prevent ? `<div class="meta">次から：${esc(n.prevent)}</div>` : ''}</div>`
+              )
+              .join('') || '<p class="muted">なし</p>'
+          }<button class="btn ghost sm" data-cats style="margin-top:8px">分類を編集</button></div>`
+    }`;
+  const qi = $('#cl-q', v);
+  qi.oninput = () => {
+    clinicQuery = qi.value;
+    render();
+    const again = $('#cl-q');
+    again.focus();
+    again.setSelectionRange(again.value.length, again.value.length);
+  };
+  bindChoices(v, 'cltab', (x) => {
+    clinicTab = x || clinicTab;
+    render();
+  });
+  $('[data-newcase]', v)?.addEventListener('click', () => openCase(null));
+  $('[data-newnote]', v)?.addEventListener('click', () => openNote(null));
+  $('[data-cats]', v)?.addEventListener('click', openNoteCats);
+  $$('[data-case]', v).forEach((el) => (el.onclick = () => openCase(el.dataset.case)));
+  $$('[data-note]', v).forEach((el) => (el.onclick = () => openNote(el.dataset.note)));
+}
+
+function openCase(id) {
+  const existing = id ? S.cases.find((c) => c.id === id) : null;
+  const c = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), date: today(), area: null, mark: '', diag: {}, diagNote: '', procedure: '', result: null, good: '', issue: '', next: '', progress: [], nextCheck: '' };
+
+  const draw = () => {
+    const items = DIAG[c.area] || [];
+    const sheet = openSheet(existing ? '症例' : '症例を記録', `
+      <div class="row">
+        <label class="field grow"><span>日付</span><input type="date" id="k-date" value="${c.date}"></label>
+        <label class="field grow"><span>部位・目印（名前は入れない）</span><input type="text" id="k-mark" value="${esc(c.mark)}" placeholder="例：#36"></label>
+      </div>
+      <h3>分野</h3>${choicesHTML('karea', CASE_AREAS.map((x) => [x, x]), c.area)}
+      <div class="card" style="margin-top:12px">
+        <h2>術前の診断</h2>
+        ${items.length ? items.map(([label, opts], i) => `<h3>${esc(label)}</h3>${choicesHTML('kd' + i, opts.map((o) => [o, o]), c.diag[label] || null)}`).join('') : '<p class="muted">分野を選ぶと、その分野の分類が出ます。</p>'}
+        <label class="field"><span class="row" style="justify-content:space-between">診断のメモ（所見、検査値など） ${voiceBtn('k-dn')}</span><textarea id="k-dn">${esc(c.diagNote)}</textarea></label>
+      </div>
+      <label class="field"><span class="row" style="justify-content:space-between">選んだ術式・治療計画 ${voiceBtn('k-proc')}</span><textarea id="k-proc" placeholder="例：再生療法（EMD＋骨補填材）、抜歯即時埋入＋CTG">${esc(c.procedure)}</textarea></label>
+      <h3>実際どうだったか</h3>${choicesHTML('kres', CASE_RESULTS, c.result)}
+      <label class="field"><span class="row" style="justify-content:space-between">うまくできたこと ${voiceBtn('k-good')}</span><textarea id="k-good">${esc(c.good)}</textarea></label>
+      <label class="field"><span class="row" style="justify-content:space-between">課題 ${voiceBtn('k-issue')}</span><textarea id="k-issue">${esc(c.issue)}</textarea></label>
+      <label class="field"><span class="row" style="justify-content:space-between">次はこうする ${voiceBtn('k-next')}</span><textarea id="k-next">${esc(c.next)}</textarea></label>
+      <div class="card">
+        <h2>経過</h2>
+        ${c.progress.map((p) => `<div class="list-item"><div class="meta">${jpDate(p.date)}</div>${esc(p.text)}</div>`).join('') || '<p class="muted">まだありません。</p>'}
+        <label class="field"><span class="row" style="justify-content:space-between">経過を追記 ${voiceBtn('k-prog')}</span><textarea id="k-prog" placeholder="例：3か月後、PD 3mm、BOPなし"></textarea></label>
+        <label class="field"><span>次に経過を見る日（その日に「今日」の画面でお知らせ）</span><input type="date" id="k-check" value="${esc(c.nextCheck || '')}"></label>
+        <div class="row">${[['1か月後', 1], ['3か月後', 3], ['6か月後', 6], ['1年後', 12]].map(([l, m]) => `<button type="button" class="btn ghost sm" data-in="${m}">${l}</button>`).join('')}</div>
+      </div>
+      <div class="row"><button class="btn grow" id="k-save">保存</button>${existing ? '<button class="btn ghost" id="k-del">削除</button>' : ''}</div>`);
+
+    const sync = () => {
+      c.date = $('#k-date', sheet).value || c.date;
+      c.mark = $('#k-mark', sheet).value;
+      const area = picked(sheet, 'karea');
+      if (area !== c.area) {
+        c.area = area;
+        return true;
+      }
+      items.forEach(([label], i) => {
+        const val = picked(sheet, 'kd' + i);
+        if (val) c.diag[label] = val;
+        else delete c.diag[label];
+      });
+      c.diagNote = $('#k-dn', sheet).value;
+      c.procedure = $('#k-proc', sheet).value;
+      c.result = picked(sheet, 'kres');
+      c.good = $('#k-good', sheet).value;
+      c.issue = $('#k-issue', sheet).value;
+      c.next = $('#k-next', sheet).value;
+      c.nextCheck = $('#k-check', sheet).value;
+      return false;
+    };
+    const readText = () => {
+      c.diagNote = $('#k-dn', sheet).value;
+      c.procedure = $('#k-proc', sheet).value;
+      c.result = picked(sheet, 'kres');
+      c.good = $('#k-good', sheet).value;
+      c.issue = $('#k-issue', sheet).value;
+      c.next = $('#k-next', sheet).value;
+      c.nextCheck = $('#k-check', sheet).value;
+    };
+    ['kres', ...items.map((_, i) => 'kd' + i)].forEach((n) => bindChoices(sheet, n, () => {}));
+    // 分野を変えたら、その分野の診断項目に描き直す
+    bindChoices(sheet, 'karea', (a) => {
+      readText();
+      c.mark = $('#k-mark', sheet).value;
+      c.area = a;
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    });
+    $$('[data-in]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          const d = new Date();
+          d.setMonth(d.getMonth() + Number(b.dataset.in));
+          $('#k-check', sheet).value = ymd(d);
+        })
+    );
+    $('#k-save', sheet).onclick = () => {
+      sync();
+      if (!c.area) return toast('分野を選んでください');
+      const prog = $('#k-prog', sheet).value.trim();
+      if (prog) c.progress.push({ date: today(), text: prog });
+      // 経過を書いたら、過ぎたお知らせは終わりにする
+      if (prog && c.nextCheck && c.nextCheck <= today()) c.nextCheck = '';
+      const i = S.cases.findIndex((x) => x.id === c.id);
+      if (i >= 0) S.cases[i] = c;
+      else S.cases.push(c);
+      save('cases');
+      closeSheet();
+      toast(existing ? '保存しました' : '記録しました。経験が積み重なっています');
+      render();
+    };
+    $('#k-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この症例の記録を消しますか？')) return;
+      S.cases = S.cases.filter((x) => x.id !== c.id);
+      save('cases');
+      closeSheet();
+      render();
+    });
+  };
+  draw();
+}
+
+function openNote(id) {
+  const existing = id ? S.notes.find((n) => n.id === id) : null;
+  const n = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), date: today(), cat: null, title: '', what: '', cause: '', how: '', prevent: '', minutes: '' };
+  const field = (key, label, ph = '') =>
+    `<label class="field"><span class="row" style="justify-content:space-between">${label} ${voiceBtn('n-' + key)}</span><textarea id="n-${key}" placeholder="${ph}">${esc(n[key])}</textarea></label>`;
+  const sheet = openSheet(existing ? '気づき・トラブル' : '気づき・トラブルを記録', `
+    <label class="field"><span>日付</span><input type="date" id="n-date" value="${n.date}"></label>
+    <h3>分類</h3>${choicesHTML('ncat', S.noteCats.map((x) => [x, x]), n.cat)}
+    <label class="field"><span>ひとことで</span><input type="text" id="n-title" value="${esc(n.title)}" placeholder="例：#46 遠心根 NiTiファイル先端の除去"></label>
+    ${field('what', '何が起きたか')}
+    ${field('cause', '原因（分かる範囲で）')}
+    ${field('how', 'どう対処したか（使った道具・手順）', '例：超音波チップ＋マイクロスコープで周囲を削合 → ...')}
+    ${field('prevent', '次から防ぐには・次はこうする')}
+    <label class="field"><span>かかった時間（任意）</span><input type="number" inputmode="numeric" class="num" id="n-min" value="${esc(n.minutes)}"> 分</label>
+    <div class="row"><button class="btn grow" id="n-save">保存</button>${existing ? '<button class="btn ghost" id="n-del">削除</button>' : ''}</div>`);
+  bindChoices(sheet, 'ncat', () => {});
+  $('#n-save', sheet).onclick = () => {
+    n.date = $('#n-date', sheet).value || n.date;
+    n.cat = picked(sheet, 'ncat') || 'その他';
+    n.title = $('#n-title', sheet).value.trim();
+    ['what', 'cause', 'how', 'prevent'].forEach((k) => (n[k] = $('#n-' + k, sheet).value));
+    n.minutes = $('#n-min', sheet).value;
+    const i = S.notes.findIndex((x) => x.id === n.id);
+    if (i >= 0) S.notes[i] = n;
+    else S.notes.push(n);
+    save('notes');
+    closeSheet();
+    toast('残しました。次の自分が助かります');
+    render();
+  };
+  $('#n-del', sheet)?.addEventListener('click', () => {
+    if (!confirm('この記録を消しますか？')) return;
+    S.notes = S.notes.filter((x) => x.id !== n.id);
+    save('notes');
+    closeSheet();
+    render();
+  });
+}
+
+function openNoteCats() {
+  const sheet = openSheet('気づき・トラブルの分類', `
+    <p class="muted">1行に1つずつ書きます。消しても、これまでの記録は残ります。</p>
+    <textarea id="nc" style="min-height:220px">${esc(S.noteCats.join('\n'))}</textarea>
+    <button class="btn wide" id="nc-save" style="margin-top:8px">保存</button>`);
+  $('#nc-save', sheet).onclick = () => {
+    const list = $('#nc', sheet).value.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!list.length) return toast('1つ以上入れてください');
+    S.noteCats = list;
+    save('noteCats');
+    closeSheet();
     render();
   };
 }
