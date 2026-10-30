@@ -329,6 +329,9 @@ function renderToday(v) {
       <h2>☾ 夜のふりかえり</h2>
       <h3>仕事の調子</h3>${choicesHTML('work', marks(MARKS), d.work)}
       <h3>だらだらした時間</h3>${choicesHTML('dawdle', DAWDLE, d.dawdle)}
+      <h3>日記</h3>
+      <label class="check"><input type="checkbox" id="diary" ${d.diary ? 'checked' : ''}> 3年日記を書いた</label>
+      <p class="muted" style="margin:4px 0 0">${diaryStreakText()}</p>
       <h3>節約</h3>
       ${SAVINGS.map(([k, label]) => `<label class="check"><input type="checkbox" data-saving="${k}" ${d.saving?.[k] ? 'checked' : ''}> ${label}</label>`).join('')}
       <label class="field"><span class="row" style="justify-content:space-between">今日のひとこと ${voiceBtn('night')}</span>
@@ -342,6 +345,11 @@ function renderToday(v) {
   $('#night').onchange = (e) => ((d.night = e.target.value), persist());
   bindChoices(v, 'work', (x) => ((d.work = x), persist()));
   bindChoices(v, 'dawdle', (x) => ((d.dawdle = x), persist()));
+  $('#diary').onchange = (e) => {
+    d.diary = e.target.checked;
+    persist();
+    render();
+  };
   $$('[data-saving]', v).forEach((c) =>
     c.addEventListener('change', () => {
       d.saving = d.saving || {};
@@ -378,6 +386,25 @@ function renderToday(v) {
       else openDrinkSheet(null, date);
     })
   );
+}
+
+// 今日まだ書いていなくても、昨日までつながっていれば続いている日数として数える
+function diaryStreak() {
+  let d = today();
+  if (!S.days[d]?.diary) d = addDays(d, -1);
+  let n = 0;
+  while (S.days[d]?.diary) {
+    n++;
+    d = addDays(d, -1);
+  }
+  return n;
+}
+function diaryStreakText() {
+  const n = diaryStreak();
+  const t = today();
+  let month = 0;
+  for (let d = t.slice(0, 8) + '01'; d <= t; d = addDays(d, 1)) if (S.days[d]?.diary) month++;
+  return n ? `${n}日続いています（今月${month}日）` : month ? `今月${month}日書きました。また今日から再開しましょう` : '書いたらチェックしましょう。書き忘れた日は「前の日」から付けられます';
 }
 
 function todayDoneHTML(date) {
@@ -1102,11 +1129,12 @@ function renderReview(v) {
           if (e) dots.push(`英${e}`);
           const r = readingMinutes(d, d);
           if (r) dots.push(`本${r}`);
+          if (dd.diary) dots.push('📔');
           if (dd.dawdle === 'lots') dots.push('📱');
           return `<div class="d${d === t ? ' today' : ''}"><div>${WD[parseYmd(d).getDay()]}</div><div class="dots">${dots.join('<br>')}</div></div>`;
         })
         .join('')}</div>
-      <p class="muted" style="margin:8px 0 0">💪筋トレ 🍺飲み会 英=英語(分) 本=読書(分) 📱だらだら多め</p>
+      <p class="muted" style="margin:8px 0 0">💪筋トレ 🍺飲み会 英=英語(分) 本=読書(分) 📔日記 📱だらだら多め</p>
     </div>
     <div class="card">
       <h2>この週のまとめ</h2>
@@ -1119,6 +1147,7 @@ function renderReview(v) {
         <div class="stat"><div class="v">${savingCount}回</div><div class="l">節約できた行動</div></div>
         <div class="stat"><div class="v">${lots}日</div><div class="l">だらだら多めの日</div></div>
         <div class="stat"><div class="v">${urges}回</div><div class="l">YouTubeをがまん</div></div>
+        <div class="stat"><div class="v">${days.filter((d) => S.days[d]?.diary).length}日</div><div class="l">日記を書いた</div></div>
       </div>
     </div>
     ${afterDrinkHTML()}`;
