@@ -88,11 +88,22 @@ const AMOUNTS = ['ちょうどいい', '少し多い', '多すぎ'];
 const DAWDLE = [['none', 'なし'], ['some', '少し'], ['lots', '多い']];
 const SAVINGS = [['conbini', 'コンビニに行かなかった'], ['bottle', '水筒を持っていった'], ['bento', 'お弁当にした']];
 const TEMPLATES = {
-  sun: { name: '日曜 ジム', exercises: ['ベンチプレス', 'スクワット', '懸垂', 'ディップス', 'インクラインベンチプレス'] },
-  tue: { name: '火曜 パーソナル', exercises: ['ベンチプレス', 'スクワット', 'デッドリフト', 'ラットプルダウン', 'アームカール', '加重腕立て'] },
-  clinic: { name: 'クリニック', exercises: ['ブルガリアンスクワット', 'アブローラー', '斜め懸垂'] },
-  free: { name: '自由', exercises: [] },
+  sun: { name: '日曜 ジム', place: 'gym', exercises: ['スクワット', 'ベンチプレス', '懸垂', 'ディップス'] },
+  tue: { name: '火曜 パーソナル', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'デッドリフト', 'ラットプルダウン', 'アームカール', '加重腕立て'] },
+  free: { name: 'ジム（自由）', place: 'gym', exercises: [] },
+  clinic: { name: 'クリニック', place: 'clinic', exercises: ['ブルガリアンスクワット', '斜め懸垂', 'ダンベルロウ', 'ショルダープレス', 'アブローラー'] },
 };
+// 週に何回やりたいか（ジムの高重量のメイン種目）
+const LIFT_GOALS = [
+  ['ベンチプレス', 2],
+  ['スクワット', 2],
+  ['デッドリフト', 1],
+];
+const placeOf = (w) => TEMPLATES[w.tpl]?.place || 'gym';
+// その週に、その種目を1セット以上やった日数
+function liftDays(ws, name) {
+  return new Set(weekWorkouts(ws).filter((w) => w.exercises.some((e) => e.name === name && e.sets.some((s) => s.reps))).map((w) => w.date)).size;
+}
 const EXTRA_EXERCISES = ['ダンベルプレス', 'ダンベルロウ', 'ショルダープレス', 'サイドレイズ', 'レッグプレス', '腕立て伏せ'];
 const ENG_KINDS = [
   ['radio', 'ラジオ英会話', ['聞く']],
@@ -722,23 +733,41 @@ function weekWorkouts(ws) {
 
 function renderGym(v) {
   const t = today();
-  const n = weekWorkouts(weekStart(t)).length;
+  const ws = weekStart(t);
+  const n = weekWorkouts(ws).length;
+  const nGym = weekWorkouts(ws).filter((w) => placeOf(w) === 'gym').length;
+  const nClinic = n - nGym;
+  const tplBtns = (place) =>
+    Object.entries(TEMPLATES)
+      .filter(([, t2]) => t2.place === place)
+      .map(([k, t2]) => `<button class="btn sub grow" data-tpl="${k}">${t2.name}</button>`)
+      .join('');
   const sorted = [...S.workouts].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.created - a.created));
   const lastBody = [...S.body].sort((a, b) => (a.date < b.date ? 1 : -1))[0];
   const msg = n >= 5 ? '最高の週です！' : n >= 3 ? 'いいペースです' : n >= 2 ? '今週は合格ライン達成' : `あと${2 - n}回で合格ライン`;
 
   v.innerHTML = `
     <div class="card">
+      <h2>今週のメイン種目</h2>
+      ${LIFT_GOALS.map(([name, goal]) => {
+        const d = liftDays(ws, name);
+        return `<div class="row" style="justify-content:space-between;padding:4px 0"><span>${name}</span>
+          <span>${[...Array(goal)].map((_, i) => (i < d ? '●' : '○')).join(' ')} <b style="color:${d >= goal ? 'var(--accent)' : 'inherit'}">${d}/${goal}${d >= goal ? ' ✓' : ''}</b></span></div>`;
+      }).join('')}
+    </div>
+    <div class="card">
       <h2>今週の筋トレ <span>${n}回</span></h2>
+      <p class="small" style="margin:0 0 4px">🏋️ ジム ${nGym}回 ・ 🏥 クリニック ${nClinic}回</p>
       <div class="meter"><i style="width:${Math.min(100, (n / 5) * 100)}%"></i></div>
       <div class="meter-marks"><span>0</span><span>2 合格</span><span>3 良い</span><span>5 最高</span></div>
       <p class="small" style="margin:8px 0 0">${msg}</p>
     </div>
     <div class="card">
       <h2>トレーニングを始める</h2>
-      <div class="row">
-        ${Object.entries(TEMPLATES).map(([k, t2]) => `<button class="btn sub grow" data-tpl="${k}">${t2.name}</button>`).join('')}
-      </div>
+      <h3>🏋️ ジム（高重量・30分）</h3>
+      <div class="row">${tplBtns('gym')}</div>
+      <h3>🏥 クリニック（ダンベル）</h3>
+      <div class="row">${tplBtns('clinic')}</div>
       <button class="btn ghost wide" style="margin-top:8px" data-skip>飲み会などで行けなかった日を記録</button>
     </div>
     <div class="card">
@@ -754,7 +783,7 @@ function renderGym(v) {
               .map((w) =>
                 w.skipped
                   ? `<div class="list-item" data-open="${w.id}"><b>${jpDate(w.date)}</b> <span class="muted">行けなかった（${esc(w.reason || '')}）</span></div>`
-                  : `<div class="list-item" data-open="${w.id}"><div class="row" style="justify-content:space-between"><b>${jpDate(w.date)}</b><span>${esc(w.name)}</span></div>
+                  : `<div class="list-item" data-open="${w.id}"><div class="row" style="justify-content:space-between"><b>${jpDate(w.date)}</b><span>${placeOf(w) === 'clinic' ? '🏥' : '🏋️'} ${esc(w.name)}</span></div>
                      <div class="meta">${esc(w.exercises.filter((e) => e.sets.length).map((e) => `${e.name} ${bestSet(e)}`).join('、'))}</div></div>`
               )
               .join('')
