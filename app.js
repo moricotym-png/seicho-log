@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 20; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 21; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -3325,7 +3325,7 @@ function openPageCapture(lang = 'en', bookId = null) {
           bookId = $('#pc-book', sheet).value || null;
           for (const f of inp.files) {
             try {
-              const blob = await shrink(f, 2000, 0.85);
+              const blob = await shrink(f, 1600, 0.8);
               files.push({ blob, url: URL.createObjectURL(blob) });
             } catch {
               toast('写真を読み込めませんでした');
@@ -3338,16 +3338,32 @@ function openPageCapture(lang = 'en', bookId = null) {
       bookId = $('#pc-book', sheet).value || null;
       const btn = $('#pc-go', sheet);
       btn.disabled = true;
-      btn.textContent = '読み取っています…（30秒〜1分ほど）';
-      try {
-        const out = await aiReadPage(files.map((f) => f.blob), lang);
-        files.forEach((f) => URL.revokeObjectURL(f.url));
-        openPageResult(out, lang, bookId);
-      } catch (e) {
+      // 2枚ずつに分けて同時に送る（1回の通信を軽くして、途中経過も見えるようにする）
+      const groups = [];
+      for (let i = 0; i < files.length; i += 2) groups.push(files.slice(i, i + 2).map((f) => f.blob));
+      let done = 0;
+      const show = () => (btn.textContent = `読み取っています… ${done}/${groups.length}（1〜2分ほど）`);
+      show();
+      const results = await Promise.allSettled(
+        groups.map((g) =>
+          aiReadPage(g, lang).then((r) => {
+            done++;
+            show();
+            return r;
+          })
+        )
+      );
+      const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+      if (!ok.length) {
         btn.disabled = false;
         btn.textContent = `AIで読み取る（${files.length}枚）`;
-        toast(aiErrorText(e), 6000);
+        return toast(aiErrorText(results[0].reason), 6000);
       }
+      const failed = results.length - ok.length;
+      if (failed) toast(`${failed * 2}枚ほど読み取れませんでした。読み取れた分だけ出します`, 5000);
+      files.forEach((f) => URL.revokeObjectURL(f.url));
+      // 内容クイズは多すぎないように、全体で5問まで
+      openPageResult({ words: ok.flatMap((r) => r.words || []), questions: ok.flatMap((r) => r.questions || []).slice(0, 5) }, lang, bookId);
     };
   };
   draw();
