@@ -4,7 +4,7 @@
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -53,6 +53,7 @@ const DEFAULTS = {
   readLogs: [],
   engLogs: [],
   words: [],
+  readQs: [],
   consults: [],
   treatments: [
     'ファイバーコア',
@@ -306,6 +307,11 @@ function renderToday(v) {
         <p class="small">いちばん古いものは受注から${oldest}日です。${oldest >= LAB_LATE ? 'まず1件だけ、手をつけてみましょう。' : ''}</p>
         <button class="btn sub" data-golab>技工を見る</button></div>`);
     }
+    const dueN = dueWords().length;
+    if (dueN) {
+      notices.push(`<div class="card good"><h2>今日の言葉の復習 ${dueN}語</h2>
+        <button class="btn" data-wquiz>復習クイズを始める</button></div>`);
+    }
     const late = chartPending();
     if (late.length) {
       notices.push(`<div class="card notice"><h2>書き終えていないカルテ ${late.length}日分</h2>
@@ -411,6 +417,7 @@ function renderToday(v) {
   $('[data-backup]', v)?.addEventListener('click', doBackup);
   $('[data-install]', v)?.addEventListener('click', doInstall);
   bindRunningCard(v);
+  $('[data-wquiz]', v)?.addEventListener('click', openWordQuiz);
   $$('[data-chartdone]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartdone, 'done')));
   $$('[data-chartoff]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartoff, 'off')));
   $$('[data-chartundo]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartundo, 'undo')));
@@ -1010,6 +1017,7 @@ function renderEng(v) {
       <div class="meter-marks"><span>0</span><span>45分 最低ライン</span><span>3時間</span></div>
       <p class="small">${todayMin >= 45 ? '最低ラインを超えました。いい調子です！' : `あと${45 - todayMin}分で最低ライン`}</p>
       <button class="btn wide" data-add>＋ 英語を記録する</button>
+      <button class="btn sub wide" data-cap style="margin-top:8px">📷 洋書のページを取り込む（線を引いた単語）</button>
       <p class="muted">洋書は「読書」の本棚から記録すると、英語の時間にも入ります。</p>
     </div>
     <div class="card">
@@ -1021,6 +1029,7 @@ function renderEng(v) {
       ${recent.length ? recent.map((x) => `<div class="list-item" data-open="${x.id}"><div class="row" style="justify-content:space-between"><b>${esc(x.kindLabel)}</b><span>${minutesLabel(x.minutes)}</span></div><div class="meta">${jpDate(x.date)} ${esc((x.skills || []).join('・'))} ${esc(x.memo || '')}</div></div>`).join('') : '<p class="muted">まだ記録はありません。</p>'}
     </div>`;
   $('[data-add]', v).onclick = () => openEngLog(t);
+  $('[data-cap]', v).onclick = () => openPageCapture('en');
   $$('[data-open]', v).forEach((el) => (el.onclick = () => openEngLog(null, el.dataset.open)));
 }
 
@@ -1118,7 +1127,9 @@ function openReadLog(bookId, date) {
     <label class="field"><span class="row" style="justify-content:space-between">ひとことつぶやき <span>${isEn ? voiceBtn('r-note', 'en-US') + ' ' : ''}${voiceBtn('r-note')}</span></span>
       <textarea id="r-note" placeholder="心に残ったこと、感じたこと"></textarea></label>
     <button class="btn wide" id="r-save">記録</button>
+    <button class="btn sub wide" id="r-cap" style="margin-top:8px">📷 線を引いたページを取り込む</button>
     ${isEn ? '<p class="muted">洋書の時間は英語の時間にも入ります。</p>' : ''}`);
+  $('#r-cap', sheet).onclick = () => openPageCapture(isEn ? 'en' : 'ja', bookId);
   bindChoices(sheet, 'rmin', (m) => m && ($('#r-min', sheet).value = m));
   $('#r-save', sheet).onclick = () => {
     S.readLogs.push({ id: uid(), created: Date.now(), date: $('#r-date', sheet).value || today(), bookId, minutes: Number($('#r-min', sheet).value) || 0, note: $('#r-note', sheet).value });
@@ -1161,50 +1172,6 @@ function openBook(id) {
     if (!confirm('この本を本棚から消しますか？（読んだ記録は残ります）')) return;
     S.books = S.books.filter((x) => x.id !== b.id);
     save('books');
-    closeSheet();
-    render();
-  });
-}
-
-function renderWords(v) {
-  const list = [...S.words].sort((a, b) => b.created - a.created);
-  v.innerHTML = `
-    <div class="card">
-      <h2>言葉の手帳 <span>${S.words.length}語</span></h2>
-      <p class="muted">赤線を引いた言葉を貯めていく場所です。写真からの取り込みと、忘れかけた頃に出る復習クイズは次の段階で追加します。</p>
-      <button class="btn wide" data-add>＋ 言葉を追加</button>
-    </div>
-    <div class="card">${list.length ? list.map((w) => `<div class="list-item" data-open="${w.id}"><b>${esc(w.word)}</b> <span class="muted">${w.lang === 'en' ? '英語' : '日本語'}</span><div class="meta">${esc(w.meaning || '')}${w.source ? ` ／ ${esc(w.source)}` : ''}</div></div>`).join('') : '<p class="muted">まだありません。</p>'}</div>`;
-  $('[data-add]', v).onclick = () => openWord(null);
-  $$('[data-open]', v).forEach((el) => (el.onclick = () => openWord(el.dataset.open)));
-}
-
-function openWord(id) {
-  const existing = id ? S.words.find((w) => w.id === id) : null;
-  const w = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), word: '', meaning: '', source: '', lang: 'ja' };
-  const sheet = openSheet(existing ? '言葉' : '言葉を追加', `
-    ${choicesHTML('lang', [['ja', '日本語'], ['en', '英語']], w.lang)}
-    <label class="field"><span>言葉</span><input type="text" id="wd-word" value="${esc(w.word)}"></label>
-    <label class="field"><span>意味</span><textarea id="wd-mean">${esc(w.meaning)}</textarea></label>
-    <label class="field"><span>出てきた本</span><select id="wd-src"><option value="">（なし）</option>${S.books.map((b) => `<option ${w.source === b.title ? 'selected' : ''}>${esc(b.title)}</option>`).join('')}</select></label>
-    <div class="row"><button class="btn grow" id="wd-save">保存</button>${existing ? '<button class="btn ghost" id="wd-del">削除</button>' : ''}</div>`);
-  bindChoices(sheet, 'lang', () => {});
-  $('#wd-save', sheet).onclick = () => {
-    w.word = $('#wd-word', sheet).value.trim();
-    if (!w.word) return toast('言葉を入れてください');
-    w.meaning = $('#wd-mean', sheet).value;
-    w.source = $('#wd-src', sheet).value;
-    w.lang = picked(sheet, 'lang') || 'ja';
-    const i = S.words.findIndex((x) => x.id === w.id);
-    if (i >= 0) S.words[i] = w;
-    else S.words.push(w);
-    save('words');
-    closeSheet();
-    render();
-  };
-  $('#wd-del', sheet)?.addEventListener('click', () => {
-    S.words = S.words.filter((x) => x.id !== w.id);
-    save('words');
     closeSheet();
     render();
   });
@@ -1326,11 +1293,26 @@ $('#btn-settings').onclick = () => {
       <label class="btn sub wide" style="display:block;text-align:center;margin-top:8px">バックアップから戻す<input type="file" id="bk-in" accept=".json,application/json" hidden></label>
     </div>
     <div class="card">
+      <h2>AIの鍵</h2>
+      <p class="muted">写真から単語を読み取るときに使います。Anthropic社のサイトで作った「APIキー」を貼り付けてください。このスマホの中だけに保存し、バックアップにも入れません。</p>
+      <div class="row"><input type="password" id="ai-key" class="grow" placeholder="sk-ant-..." autocomplete="off"><button class="btn sm" id="ai-save">保存</button></div>
+      <p class="small" id="ai-state"></p>
+    </div>
+    <div class="card">
       <h2>診療日</h2>
       <p class="muted">カルテのチェックは、この曜日だけ出します。</p>
       <div class="choices" id="cdays">${WD.map((w, i) => `<button type="button" class="choice${S.settings.clinicDays.includes(i) ? ' on' : ''}" data-wd="${i}">${w}</button>`).join('')}</div>
     </div>
     <p class="muted">成長ログ 第1段階 ・ 記録はこのスマホの中だけに保存されています。</p>`);
+  aiKey().then((k) => ($('#ai-state', sheet).textContent = k ? `保存済み（…${k.slice(-4)}）` : 'まだ入っていません'));
+  $('#ai-save', sheet).onclick = async () => {
+    const k = $('#ai-key', sheet).value.trim();
+    if (!k) return toast('キーを貼り付けてください');
+    await setAiKey(k);
+    $('#ai-key', sheet).value = '';
+    $('#ai-state', sheet).textContent = `保存済み（…${k.slice(-4)}）`;
+    toast('AIの鍵を保存しました');
+  };
   $('#cdays', sheet).onclick = (e) => {
     const b = e.target.closest('[data-wd]');
     if (!b) return;
@@ -2823,6 +2805,467 @@ async function restorePhotos(list) {
     await photoPut({ ...p, blob: await (await fetch(p.blob)).blob(), thumb: await (await fetch(p.thumb)).blob() });
   }
   thumbURLs.clear();
+}
+
+/* ========== AI（Claude）の呼び出し ========== */
+// 鍵（APIキー）はこのスマホの中だけに保存し、バックアップにも入れない。
+const AI_MODEL = 'claude-opus-5-5';
+let aiKeyCache = null;
+async function aiKey() {
+  if (aiKeyCache === null) aiKeyCache = (await dbGet('apiKey')) || '';
+  return aiKeyCache;
+}
+async function setAiKey(k) {
+  aiKeyCache = k;
+  await dbPut('apiKey', k);
+}
+let sdkPromise = null;
+const loadSDK = () => (sdkPromise ||= import('./vendor/anthropic-sdk-0.135.0.mjs').then((m) => m.default));
+
+const PAGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['words', 'questions'],
+  properties: {
+    words: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['word', 'surface', 'reading', 'pos', 'meaning_ja', 'meaning_en', 'sentence', 'note'],
+        properties: {
+          word: { type: 'string' },
+          surface: { type: 'string' },
+          reading: { type: 'string' },
+          pos: { type: 'string' },
+          meaning_ja: { type: 'string' },
+          meaning_en: { type: 'string' },
+          sentence: { type: 'string' },
+          note: { type: 'string' },
+        },
+      },
+    },
+    questions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['question', 'choices', 'answer', 'explanation_ja'],
+        properties: {
+          question: { type: 'string' },
+          choices: { type: 'array', items: { type: 'string' } },
+          answer: { type: 'integer' },
+          explanation_ja: { type: 'string' },
+        },
+      },
+    },
+  },
+};
+
+const PAGE_PROMPT = {
+  en: `This is a photo of a page from an English book the reader is reading aloud. The reader underlines words and phrases they don't know.
+
+1. Find every underlined word or phrase (pen or pencil lines under the text). Only underlined ones. If nothing is underlined, return an empty "words" list.
+2. For each one, fill in:
+   - word: the dictionary form (lemma). Keep multi-word phrases as phrases.
+   - surface: the form as written on the page.
+   - reading: IPA pronunciation of the dictionary form.
+   - pos: part of speech in Japanese (名詞, 動詞, 形容詞, 副詞, 句動詞, 熟語 etc.).
+   - meaning_ja: a short Japanese meaning that fits this context.
+   - meaning_en: a short, simple English definition (learner's dictionary style).
+   - sentence: the full sentence from the page that contains it, copied exactly.
+   - note: one short Japanese line on nuance, common collocations, or a confusable word. Empty string if nothing useful.
+3. Write 3 comprehension questions in English about the content of this page, each with 4 English choices. "answer" is the 0-based index of the correct choice. explanation_ja explains the answer in one or two short Japanese sentences and points to where in the text it is. Test understanding of the argument, not trivia. Do not summarize the page anywhere.
+
+The reader is a Japanese dentist reading at about CEFR C1.`,
+  ja: `これは読書中の日本語の本（純文学など）のページの写真です。読者は分からない言葉に線を引いています。
+
+1. 線が引かれた言葉・語句をすべて見つけてください（線のあるものだけ）。なければ words は空の配列にしてください。
+2. それぞれについて：
+   - word: 辞書に載っている形
+   - surface: ページに書かれている形
+   - reading: ひらがなの読み
+   - pos: 品詞（名詞、動詞、形容詞、副詞、慣用句など）
+   - meaning_ja: この文脈に合う短い意味
+   - meaning_en: 空文字
+   - sentence: その言葉を含む一文を、ページの通りに書き写す
+   - note: 語源、似た言葉との違い、使い方など、覚えるのに役立つことを一行で。なければ空文字
+3. questions は空の配列にしてください。`,
+};
+
+// ページの写真から、線を引いた言葉と（英語なら）内容の確認問題を作ってもらう
+async function aiReadPage(blobs, lang) {
+  const key = await aiKey();
+  if (!key) throw new Error('nokey');
+  const Anthropic = await loadSDK();
+  const client = new Anthropic({ apiKey: key, dangerouslyAllowBrowser: true });
+  const images = [];
+  for (const b of blobs) {
+    const data = (await blobToDataURL(b)).split(',')[1];
+    images.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data } });
+  }
+  const res = await client.beta.messages.create({
+    model: AI_MODEL,
+    max_tokens: 16000,
+    betas: ['server-side-fallback-2026-07-01'],
+    fallbacks: 'default',
+    output_config: { format: { type: 'json_schema', schema: PAGE_SCHEMA } },
+    messages: [{ role: 'user', content: [...images, { type: 'text', text: PAGE_PROMPT[lang] }] }],
+  });
+  if (res.stop_reason === 'refusal') throw new Error('refusal');
+  if (res.stop_reason === 'max_tokens') throw new Error('toolong');
+  const text = res.content.filter((c) => c.type === 'text').map((c) => c.text).join('');
+  return JSON.parse(text);
+}
+
+function aiErrorText(e) {
+  if (e?.message === 'nokey') return 'AIの鍵がまだ入っていません。⚙︎（設定）の「AIの鍵」に入れてください。';
+  if (e?.message === 'refusal') return 'AIがこの写真を読み取れませんでした。別の写真で試してください。';
+  if (e?.message === 'toolong') return '1回に読み取る量が多すぎました。写真の枚数を減らしてください。';
+  const status = e?.status;
+  if (status === 401) return 'AIの鍵が正しくないようです。⚙︎（設定）で入れ直してください。';
+  if (status === 429) return 'AIが混み合っています。少し待ってからもう一度試してください。';
+  if (status === 400 && /credit/i.test(e?.message || '')) return 'AIの利用残高が足りません。Anthropicのサイトで残高を追加してください。';
+  if (!navigator.onLine) return '電波がつながっていません。';
+  return `うまくいきませんでした（${esc(String(status || e?.message || 'エラー'))}）。もう一度試してください。`;
+}
+
+/* ========== ページの写真から言葉を取り込む ========== */
+function openPageCapture(lang = 'en', bookId = null) {
+  const books = S.books.filter((b) => (lang === 'en' ? b.genre === '洋書' : b.genre !== '洋書') && b.status !== 'done');
+  const files = [];
+  const draw = () => {
+    const sheet = openSheet(lang === 'en' ? '洋書のページを取り込む' : '本のページを取り込む', `
+      <p class="small">線を引いたページを撮ってください。AIが線の引かれた言葉を見つけて、意味と例文を手帳に入れます${lang === 'en' ? '。内容の確認クイズも作ります' : ''}。</p>
+      <label class="field"><span>本</span><select id="pc-book"><option value="">（選ばない）</option>${books
+        .map((b) => `<option value="${b.id}" ${b.id === bookId ? 'selected' : ''}>${esc(b.title)}</option>`)
+        .join('')}</select></label>
+      <div class="photo-grid" id="pc-thumbs">${files.map((f, i) => `<div class="ph"><img src="${f.url}" alt=""><span>${i + 1}枚目</span></div>`).join('')}</div>
+      <div class="row" style="margin-top:8px">
+        <label class="btn sub grow" style="text-align:center">📷 撮る<input type="file" accept="image/*" capture="environment" data-pcin hidden></label>
+        <label class="btn sub grow" style="text-align:center">🖼 選ぶ<input type="file" accept="image/*" multiple data-pcin hidden></label>
+      </div>
+      <button class="btn wide" id="pc-go" style="margin-top:12px" ${files.length ? '' : 'disabled'}>AIで読み取る（${files.length}枚）</button>
+      <p class="muted">写真はAI（Anthropic社のClaude）に送られます。本のページ以外は写さないようにしてください。</p>`);
+    $$('[data-pcin]', sheet).forEach(
+      (inp) =>
+        (inp.onchange = async () => {
+          bookId = $('#pc-book', sheet).value || null;
+          for (const f of inp.files) {
+            try {
+              const blob = await shrink(f, 2000, 0.85);
+              files.push({ blob, url: URL.createObjectURL(blob) });
+            } catch {
+              toast('写真を読み込めませんでした');
+            }
+          }
+          draw();
+        })
+    );
+    $('#pc-go', sheet).onclick = async () => {
+      bookId = $('#pc-book', sheet).value || null;
+      const btn = $('#pc-go', sheet);
+      btn.disabled = true;
+      btn.textContent = '読み取っています…（30秒〜1分ほど）';
+      try {
+        const out = await aiReadPage(files.map((f) => f.blob), lang);
+        files.forEach((f) => URL.revokeObjectURL(f.url));
+        openPageResult(out, lang, bookId);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = `AIで読み取る（${files.length}枚）`;
+        toast(aiErrorText(e), 6000);
+      }
+    };
+  };
+  draw();
+}
+
+function openPageResult(out, lang, bookId) {
+  const book = bookOf(bookId);
+  const words = out.words || [];
+  const qs = (out.questions || []).filter((q) => q.choices?.length >= 2 && q.answer >= 0 && q.answer < q.choices.length);
+  const sheet = openSheet('読み取った言葉', `
+    ${words.length ? `<p class="small">${words.length}語見つかりました。手帳に入れないものはチェックを外してください。</p>` : '<p class="small">線を引いた言葉は見つかりませんでした。</p>'}
+    ${words
+      .map(
+        (w, i) => `<div class="card" style="padding:10px">
+        <label class="row" style="gap:8px"><input type="checkbox" data-keep="${i}" checked style="width:22px;height:22px;accent-color:var(--accent)">
+          <b>${esc(w.word)}</b> <span class="muted small">${esc(w.reading)} ${esc(w.pos)}</span></label>
+        <input type="text" data-mean="${i}" value="${esc(w.meaning_ja)}" style="margin-top:6px">
+        ${w.meaning_en ? `<div class="small" style="margin-top:4px">${esc(w.meaning_en)}</div>` : ''}
+        <div class="muted" style="margin-top:4px">${esc(w.sentence)}</div>
+        ${w.note ? `<div class="small" style="margin-top:4px">💡 ${esc(w.note)}</div>` : ''}
+      </div>`
+      )
+      .join('')}
+    <button class="btn wide" id="pr-save">${words.length ? '手帳に入れる' : '閉じる'}</button>`);
+  $('#pr-save', sheet).onclick = () => {
+    let n = 0;
+    words.forEach((w, i) => {
+      if (!$(`[data-keep="${i}"]`, sheet).checked) return;
+      const meaning = $(`[data-mean="${i}"]`, sheet).value.trim() || w.meaning_ja;
+      // 同じ言葉がもう手帳にあれば、例文と出てきた本を足して復習をやり直す
+      const dup = S.words.find((x) => x.lang === lang && x.word.toLowerCase() === w.word.toLowerCase());
+      if (dup) {
+        dup.sentences = [...new Set([...(dup.sentences || (dup.sentence ? [dup.sentence] : [])), w.sentence].filter(Boolean))];
+        dup.srs = { level: 0, due: today() };
+        dup.seen = (dup.seen || 1) + 1;
+        return;
+      }
+      S.words.push({
+        id: uid(),
+        created: Date.now(),
+        lang,
+        word: w.word,
+        surface: w.surface,
+        reading: w.reading,
+        pos: w.pos,
+        meaning,
+        meaningEn: w.meaning_en,
+        sentence: w.sentence,
+        note: w.note,
+        source: book?.title || '',
+        srs: { level: 0, due: addDays(today(), 1) },
+      });
+      n++;
+    });
+    save('words');
+    if (lang === 'en' && qs.length) {
+      S.readQs.push({ id: uid(), date: today(), bookId, questions: qs, answered: null });
+      save('readQs');
+    }
+    closeSheet();
+    if (lang === 'en' && qs.length) {
+      toast(`${n}語を手帳に入れました。続けて内容のクイズです`);
+      openReadQuiz(S.readQs[S.readQs.length - 1].id);
+    } else {
+      toast(`${n}語を手帳に入れました。明日から復習クイズに出ます`);
+      render();
+    }
+  };
+}
+
+/* ========== 内容の確認クイズ（英語・4択） ========== */
+function openReadQuiz(id) {
+  const set = S.readQs.find((x) => x.id === id);
+  if (!set) return;
+  let i = 0;
+  let correct = 0;
+  const step = () => {
+    if (i >= set.questions.length) {
+      set.answered = { date: today(), correct, total: set.questions.length };
+      save('readQs');
+      const sheet = openSheet('内容の確認クイズ', `<div class="card good"><h2>${correct} / ${set.questions.length} 問正解</h2>
+        <p class="small">${correct === set.questions.length ? 'しっかり読めています！' : '分からなかったところを、もう一度音読してみましょう。'}</p></div>
+        <button class="btn wide" data-close>閉じる</button>`);
+      return sheet;
+    }
+    const q = set.questions[i];
+    const sheet = openSheet(`内容の確認クイズ ${i + 1}/${set.questions.length}`, `
+      <p style="font-size:17px">${esc(q.question)}</p>
+      ${q.choices.map((c, k) => `<button class="btn sub wide" style="margin-bottom:8px;text-align:left" data-ans="${k}">${'ABCD'[k] || k + 1}. ${esc(c)}</button>`).join('')}
+      <div id="rq-exp"></div>`);
+    $$('[data-ans]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          const k = Number(b.dataset.ans);
+          const ok = k === q.answer;
+          if (ok) correct++;
+          $$('[data-ans]', sheet).forEach((x) => {
+            x.disabled = true;
+            if (Number(x.dataset.ans) === q.answer) x.classList.remove('sub');
+          });
+          $('#rq-exp', sheet).innerHTML = `<div class="card ${ok ? 'good' : 'notice'}"><b>${ok ? '正解！' : '惜しい'}</b><p class="small" style="margin:6px 0 0">${esc(q.explanation_ja)}</p></div>
+            <button class="btn wide" id="rq-next">${i + 1 < set.questions.length ? '次へ' : '結果を見る'}</button>`;
+          $('#rq-next', sheet).onclick = () => {
+            i++;
+            step();
+          };
+        })
+    );
+  };
+  step();
+}
+
+/* ========== 言葉の復習クイズ ========== */
+// 正解するたびに次に出す日をのばす（忘れかけた頃にもう一度出す）。間違えたら翌日にやり直し。
+const SRS_DAYS = [1, 3, 7, 14, 30, 60, 120];
+const dueWords = () => S.words.filter((w) => (w.srs?.due || today()) <= today());
+
+function shuffle(a) {
+  const x = [...a];
+  for (let i = x.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [x[i], x[j]] = [x[j], x[i]];
+  }
+  return x;
+}
+
+function makeQuestion(w) {
+  const pool = S.words.filter((x) => x.id !== w.id && x.lang === w.lang && x.meaning);
+  const kinds = ['meaning'];
+  const sent = w.sentence || w.sentences?.[0];
+  const surf = w.surface || w.word;
+  if (sent && sent.toLowerCase().includes(surf.toLowerCase())) kinds.push('blank');
+  if (pool.length < 3) return { kind: 'self', w };
+  const kind = kinds[Math.floor(Math.random() * kinds.length)];
+  if (kind === 'meaning') {
+    const choices = shuffle([w.meaning, ...shuffle(pool).slice(0, 3).map((x) => x.meaning)]);
+    return { kind, w, prompt: w.word, sub: w.reading || '', choices, answer: choices.indexOf(w.meaning) };
+  }
+  const re = new RegExp(surf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+  const choices = shuffle([surf, ...shuffle(pool).slice(0, 3).map((x) => x.surface || x.word)]);
+  return { kind, w, prompt: sent.replace(re, '＿＿＿＿'), sub: `ヒント：${w.meaning}`, choices, answer: choices.indexOf(surf) };
+}
+
+function gradeWord(w, ok) {
+  const lv = ok ? Math.min((w.srs?.level || 0) + 1, SRS_DAYS.length) : 0;
+  w.srs = { level: lv, due: addDays(today(), ok ? SRS_DAYS[lv - 1] : 1), last: today() };
+  w.stats = { right: (w.stats?.right || 0) + (ok ? 1 : 0), wrong: (w.stats?.wrong || 0) + (ok ? 0 : 1) };
+}
+
+function openWordQuiz() {
+  let queue = shuffle(dueWords()).slice(0, 20);
+  if (!queue.length) return toast('今日の復習は終わっています');
+  const total = queue.length;
+  let right = 0;
+  const missed = new Set();
+  const next = () => {
+    if (!queue.length) {
+      save('words');
+      openSheet('復習クイズ', `<div class="card good"><h2>${total}語 おわり！</h2>
+        <p class="small">一度で正解：${right}語${missed.size ? `／もう一度：${missed.size}語（明日また出ます）` : ''}</p></div>
+        <button class="btn wide" data-close>閉じる</button>`);
+      return;
+    }
+    const w = queue.shift();
+    const q = makeQuestion(w);
+    const head = `<div class="muted small">${total - queue.length}/${total}・${w.lang === 'en' ? '英語' : '日本語'}${w.source ? `・${esc(w.source)}` : ''}</div>`;
+    const finish = (ok) => {
+      if (!missed.has(w.id)) {
+        gradeWord(w, ok);
+        if (ok) right++;
+      }
+      if (!ok) {
+        missed.add(w.id);
+        queue.push(w); // 間違えた言葉は最後にもう一度
+      }
+    };
+    const answerCard = (ok) => `<div class="card ${ok ? 'good' : 'notice'}">
+        <b>${ok ? '正解！' : 'こたえ'}</b>：<b>${esc(w.word)}</b> ${esc(w.reading || '')}<br>${esc(w.meaning)}
+        ${w.meaningEn ? `<div class="small">${esc(w.meaningEn)}</div>` : ''}
+        ${w.sentence ? `<div class="muted" style="margin-top:4px">${esc(w.sentence)}</div>` : ''}
+        ${w.note ? `<div class="small" style="margin-top:4px">💡 ${esc(w.note)}</div>` : ''}</div>
+        <button class="btn wide" id="wq-next">次へ</button>`;
+    if (q.kind === 'self') {
+      const sheet = openSheet('復習クイズ', `${head}<p style="font-size:22px;font-weight:700;margin:10px 0">${esc(w.word)}</p>
+        <p class="small">意味を思い出してから、めくってください。</p>
+        <button class="btn wide" id="wq-flip">めくる</button><div id="wq-a"></div>`);
+      $('#wq-flip', sheet).onclick = () => {
+        $('#wq-flip', sheet).remove();
+        $('#wq-a', sheet).innerHTML = `${answerCard(true).replace('正解！', 'こたえ').split('<button')[0]}
+          <div class="row"><button class="btn grow" id="wq-ok">覚えていた</button><button class="btn sub grow" id="wq-ng">忘れていた</button></div>`;
+        $('#wq-ok', sheet).onclick = () => (finish(true), next());
+        $('#wq-ng', sheet).onclick = () => (finish(false), next());
+      };
+      return;
+    }
+    const sheet = openSheet('復習クイズ', `${head}
+      <p style="font-size:${q.kind === 'meaning' ? '22px;font-weight:700' : '16px'};margin:10px 0">${esc(q.prompt)}</p>
+      ${q.sub ? `<p class="muted">${esc(q.sub)}</p>` : ''}
+      ${q.choices.map((c, k) => `<button class="btn sub wide" style="margin-bottom:8px;text-align:left" data-wa="${k}">${esc(c)}</button>`).join('')}
+      <div id="wq-a"></div>`);
+    $$('[data-wa]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          const ok = Number(b.dataset.wa) === q.answer;
+          finish(ok);
+          $$('[data-wa]', sheet).forEach((x) => {
+            x.disabled = true;
+            if (Number(x.dataset.wa) === q.answer) x.classList.remove('sub');
+          });
+          $('#wq-a', sheet).innerHTML = answerCard(ok);
+          $('#wq-next', sheet).onclick = next;
+        })
+    );
+  };
+  next();
+}
+
+function renderWords(v) {
+  const list = [...S.words].sort((a, b) => b.created - a.created);
+  const due = dueWords().length;
+  const learned = S.words.filter((w) => (w.srs?.level || 0) >= 4).length;
+  const pendingQs = S.readQs.filter((x) => !x.answered);
+  v.innerHTML = `
+    <div class="card${due ? ' good' : ''}">
+      <h2>今日の復習 <span>${due}語</span></h2>
+      <button class="btn wide" data-quiz ${due ? '' : 'disabled'}>${due ? '復習クイズを始める' : '今日の復習は終わりました'}</button>
+      <p class="muted" style="margin:8px 0 0">手帳 ${S.words.length}語 ・ 定着（4回以上連続で正解）${learned}語</p>
+    </div>
+    ${pendingQs.length ? `<div class="card"><h2>まだ解いていない内容クイズ <span>${pendingQs.length}</span></h2>${pendingQs.map((x) => `<button class="btn sub wide" style="margin-bottom:6px" data-rq="${x.id}">${jpDate(x.date)} ${esc(bookOf(x.bookId)?.title || '')}</button>`).join('')}</div>` : ''}
+    <div class="card">
+      <h2>ページから取り込む</h2>
+      <div class="row"><button class="btn sub grow" data-cap="en">📷 洋書</button><button class="btn sub grow" data-cap="ja">📷 日本語の本</button></div>
+      <button class="btn ghost wide" data-add style="margin-top:8px">＋ 手で追加</button>
+    </div>
+    <div class="card">${
+      list.length
+        ? list
+            .map(
+              (w) => `<div class="list-item" data-open="${w.id}"><b>${esc(w.word)}</b> <span class="muted">${w.lang === 'en' ? '英語' : '日本語'}${w.srs ? ` ・次 ${jpDate(w.srs.due)}` : ''}</span>
+              <div class="meta">${esc(w.meaning || '')}${w.source ? ` ／ ${esc(w.source)}` : ''}</div></div>`
+            )
+            .join('')
+        : '<p class="muted">まだありません。</p>'
+    }</div>`;
+  $('[data-quiz]', v).onclick = openWordQuiz;
+  $('[data-add]', v).onclick = () => openWord(null);
+  $$('[data-cap]', v).forEach((b) => (b.onclick = () => openPageCapture(b.dataset.cap)));
+  $$('[data-rq]', v).forEach((b) => (b.onclick = () => openReadQuiz(b.dataset.rq)));
+  $$('[data-open]', v).forEach((el) => (el.onclick = () => openWord(el.dataset.open)));
+}
+
+function openWord(id) {
+  const existing = id ? S.words.find((w) => w.id === id) : null;
+  const w = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), word: '', meaning: '', source: '', lang: 'en', srs: { level: 0, due: addDays(today(), 1) } };
+  const sheet = openSheet(existing ? '言葉' : '言葉を追加', `
+    ${choicesHTML('lang', [['en', '英語'], ['ja', '日本語']], w.lang)}
+    <label class="field"><span>言葉</span><input type="text" id="wd-word" value="${esc(w.word)}"></label>
+    <label class="field"><span>読み・発音</span><input type="text" id="wd-read" value="${esc(w.reading || '')}"></label>
+    <label class="field"><span>意味</span><textarea id="wd-mean">${esc(w.meaning)}</textarea></label>
+    <label class="field"><span>英語での意味</span><input type="text" id="wd-en" value="${esc(w.meaningEn || '')}"></label>
+    <label class="field"><span>出てきた文</span><textarea id="wd-sent">${esc(w.sentence || '')}</textarea></label>
+    <label class="field"><span>メモ</span><input type="text" id="wd-note" value="${esc(w.note || '')}"></label>
+    <label class="field"><span>出てきた本</span><select id="wd-src"><option value="">（なし）</option>${S.books.map((b) => `<option ${w.source === b.title ? 'selected' : ''}>${esc(b.title)}</option>`).join('')}</select></label>
+    ${existing?.stats ? `<p class="muted">正解${existing.stats.right}回・間違い${existing.stats.wrong}回・次の復習 ${jpDate(existing.srs.due)}</p>` : ''}
+    <div class="row"><button class="btn grow" id="wd-save">保存</button>${existing ? '<button class="btn ghost" id="wd-del">削除</button>' : ''}</div>`);
+  bindChoices(sheet, 'lang', () => {});
+  $('#wd-save', sheet).onclick = () => {
+    w.word = $('#wd-word', sheet).value.trim();
+    if (!w.word) return toast('言葉を入れてください');
+    w.reading = $('#wd-read', sheet).value.trim();
+    w.meaning = $('#wd-mean', sheet).value;
+    w.meaningEn = $('#wd-en', sheet).value.trim();
+    w.sentence = $('#wd-sent', sheet).value.trim();
+    w.note = $('#wd-note', sheet).value.trim();
+    w.source = $('#wd-src', sheet).value;
+    w.lang = picked(sheet, 'lang') || 'en';
+    const i = S.words.findIndex((x) => x.id === w.id);
+    if (i >= 0) S.words[i] = w;
+    else S.words.push(w);
+    save('words');
+    closeSheet();
+    render();
+  };
+  $('#wd-del', sheet)?.addEventListener('click', () => {
+    if (!confirm('この言葉を手帳から消しますか？')) return;
+    S.words = S.words.filter((x) => x.id !== w.id);
+    save('words');
+    closeSheet();
+    render();
+  });
 }
 
 /* ========== ホーム画面に追加 ========== */
