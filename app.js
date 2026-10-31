@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 23; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 24; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -3512,7 +3512,14 @@ function makeQuestion(w) {
   const surf = w.surface || w.word;
   if (sent && sent.toLowerCase().includes(surf.toLowerCase())) kinds.push('blank');
   if (pool.length < 3) return { kind: 'self', w };
+  // 日本語の言葉は「読み方」も問う（難しい漢字の読みを覚えるため）
+  const readPool = pool.filter((x) => x.reading && x.reading !== w.reading);
+  if (w.lang === 'ja' && w.reading && readPool.length >= 3) kinds.push('reading', 'reading');
   const kind = kinds[Math.floor(Math.random() * kinds.length)];
+  if (kind === 'reading') {
+    const choices = shuffle([w.reading, ...shuffle([...new Set(readPool.map((x) => x.reading))]).slice(0, 3)]);
+    return { kind, w, prompt: w.word, sub: 'この言葉の読み方は？', choices, answer: choices.indexOf(w.reading) };
+  }
   if (kind === 'meaning') {
     const choices = shuffle([w.meaning, ...shuffle(pool).slice(0, 3).map((x) => x.meaning)]);
     return { kind, w, prompt: w.word, sub: w.reading || '', choices, answer: choices.indexOf(w.meaning) };
