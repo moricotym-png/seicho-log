@@ -762,6 +762,7 @@ function renderGym(v) {
       <div class="meter-marks"><span>0</span><span>2 合格</span><span>3 良い</span><span>5 最高</span></div>
       <p class="small" style="margin:8px 0 0">${msg}</p>
     </div>
+    ${balanceHTML()}
     <div class="card">
       <h2>トレーニングを始める</h2>
       <h3>🏋️ ジム（高重量・30分）</h3>
@@ -792,6 +793,7 @@ function renderGym(v) {
     </div>`;
   $$('[data-tpl]', v).forEach((b) => (b.onclick = () => openWorkout(null, b.dataset.tpl, t)));
   $('[data-skip]', v).onclick = () => openSkip(t);
+  bindBalance(v);
   $('[data-body]', v).onclick = openBody;
   $$('[data-open]', v).forEach((el) => {
     el.onclick = () => {
@@ -999,6 +1001,153 @@ function openBody() {
     save('body');
     closeSheet();
     toast('記録しました');
+    render();
+  };
+}
+
+/* ---------- 部位のバランス（1か月） ---------- */
+// 部位ごとの色。色だけに頼らず、カレンダーにも棒にも部位の文字を必ず添える。
+const PARTS = [
+  ['胸', '#2a78d6'],
+  ['背中', '#eb6834'],
+  ['脚', '#1baf7a'],
+  ['肩', '#eda100'],
+  ['腕', '#e87ba4'],
+  ['腹', '#6250d6'],
+  ['その他', '#9aa39f'],
+];
+const PART_COLOR = Object.fromEntries(PARTS);
+// 種目 → 鍛える部位（複数あれば両方に数える）。分からない種目は設定で決められる。
+const EX_PARTS = {
+  ベンチプレス: ['胸'],
+  インクラインベンチプレス: ['胸'],
+  ダンベルプレス: ['胸'],
+  腕立て伏せ: ['胸'],
+  加重腕立て: ['胸'],
+  ディップス: ['胸', '腕'],
+  懸垂: ['背中'],
+  斜め懸垂: ['背中'],
+  ラットプルダウン: ['背中'],
+  ダンベルロウ: ['背中'],
+  デッドリフト: ['背中', '脚'],
+  スクワット: ['脚'],
+  ブルガリアンスクワット: ['脚'],
+  レッグプレス: ['脚'],
+  ショルダープレス: ['肩'],
+  サイドレイズ: ['肩'],
+  アームカール: ['腕'],
+  アブローラー: ['腹'],
+};
+const partsOf = (name) => S.settings.exParts?.[name] || EX_PARTS[name] || ['その他'];
+let balanceMonth = null;
+
+// その月の、日ごと・部位ごとのセット数
+function monthParts(ym) {
+  const days = {};
+  const total = Object.fromEntries(PARTS.map(([p]) => [p, 0]));
+  for (const w of S.workouts) {
+    if (w.skipped || monthKey(w.date) !== ym) continue;
+    for (const e of w.exercises) {
+      const n = e.sets.filter((s) => s.reps).length;
+      if (!n) continue;
+      for (const p of partsOf(e.name)) {
+        total[p] += n;
+        days[w.date] = days[w.date] || {};
+        days[w.date][p] = (days[w.date][p] || 0) + n;
+      }
+    }
+  }
+  return { days, total };
+}
+const prevMonth = (ym) => {
+  const d = parseYmd(ym + '-01');
+  d.setMonth(d.getMonth() - 1);
+  return ymd(d).slice(0, 7);
+};
+
+function balanceHTML() {
+  const ym = balanceMonth || today().slice(0, 7);
+  const cur = monthParts(ym);
+  const last = monthParts(prevMonth(ym)).total;
+  const first = parseYmd(ym + '-01');
+  const lead = (first.getDay() + 6) % 7; // 月曜はじまり
+  const nDays = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push('<div class="cal-d empty"></div>');
+  for (let d = 1; d <= nDays; d++) {
+    const date = `${ym}-${String(d).padStart(2, '0')}`;
+    const ps = cur.days[date] || {};
+    const tags = PARTS.filter(([p]) => ps[p]).map(([p, c]) => `<span class="pt"><i style="background:${c}"></i>${p === 'その他' ? '他' : p === '背中' ? '背' : p}</span>`);
+    cells.push(`<button type="button" class="cal-d${date === today() ? ' today' : ''}${tags.length ? ' has' : ''}" data-cal="${date}"><b>${d}</b>${tags.join('')}</button>`);
+  }
+  const shown = PARTS.filter(([p]) => p !== 'その他' || cur.total[p] || last[p]);
+  const max = Math.max(1, ...shown.map(([p]) => Math.max(cur.total[p], last[p])));
+  const trained = shown.filter(([p]) => p !== 'その他');
+  const low = trained.filter(([p]) => cur.total[p] === Math.min(...trained.map(([q]) => cur.total[q])));
+  const isNow = ym === today().slice(0, 7);
+  const unknown = [...new Set(S.workouts.flatMap((w) => (w.skipped ? [] : w.exercises.filter((e) => e.sets.length && partsOf(e.name)[0] === 'その他').map((e) => e.name))))];
+  return `<div class="card">
+    <h2>部位のバランス</h2>
+    <div class="nav"><button class="btn ghost sm" data-bm="-1">◀</button><b>${first.getFullYear()}年${first.getMonth() + 1}月</b><button class="btn ghost sm" data-bm="1" ${isNow ? 'style="visibility:hidden"' : ''}>▶</button></div>
+    <div class="cal">${['月', '火', '水', '木', '金', '土', '日'].map((w) => `<div class="cal-h">${w}</div>`).join('')}${cells.join('')}</div>
+    <h3>部位ごとのセット数</h3>
+    <div class="bars">
+      ${shown
+        .map(
+          ([p, c]) => `<div class="bar-row"><span class="bar-l"><i style="background:${c}"></i>${p}</span>
+          <span class="bar-t"><span class="bar" style="width:${(cur.total[p] / max) * 100}%;background:${c}"></span><span class="bar ghost" style="width:${(last[p] / max) * 100}%"></span></span>
+          <span class="bar-v"><b>${cur.total[p]}</b><span class="muted">／${last[p]}</span></span></div>`
+        )
+        .join('')}
+    </div>
+    <p class="muted" style="margin:6px 0 0">色の棒＝${isNow ? '今月' : 'この月'}、灰色の棒＝前の月（数字は セット数／前の月）</p>
+    ${isNow && low.length && Object.values(cur.total).some(Boolean) ? `<p class="small" style="margin:8px 0 0">今月まだ少ないのは <b>${low.map(([p]) => p).join('・')}</b> です。次のトレーニングで足してみましょう。</p>` : ''}
+    ${unknown.length ? `<button class="btn ghost sm" data-parts style="margin-top:8px">部位が決まっていない種目 ${unknown.length}つ</button>` : ''}
+  </div>`;
+}
+
+function bindBalance(v) {
+  $$('[data-bm]', v).forEach(
+    (b) =>
+      (b.onclick = () => {
+        balanceMonth = (Number(b.dataset.bm) < 0 ? prevMonth : (ym) => {
+          const d = parseYmd(ym + '-01');
+          d.setMonth(d.getMonth() + 1);
+          return ymd(d).slice(0, 7);
+        })(balanceMonth || today().slice(0, 7));
+        render();
+      })
+  );
+  $$('[data-cal]', v).forEach(
+    (b) =>
+      (b.onclick = () => {
+        const list = S.workouts.filter((w) => w.date === b.dataset.cal && !w.skipped);
+        if (list.length === 1) openWorkout(list[0].id);
+        else if (list.length > 1) {
+          const sheet = openSheet(jpDate(b.dataset.cal), list.map((w) => `<button class="btn sub wide" style="margin-bottom:8px" data-w="${w.id}">${esc(w.name)}</button>`).join(''));
+          $$('[data-w]', sheet).forEach((x) => (x.onclick = () => openWorkout(x.dataset.w)));
+        }
+      })
+  );
+  $('[data-parts]', v)?.addEventListener('click', openExParts);
+}
+
+// 部位が決まっていない種目に部位を付ける
+function openExParts() {
+  const names = [...new Set(S.workouts.flatMap((w) => (w.skipped ? [] : w.exercises.map((e) => e.name))))].filter((n) => !EX_PARTS[n]);
+  const sheet = openSheet('種目の部位', `
+    <p class="muted">鍛える部位を選んでください（いくつでも）。</p>
+    ${names.map((n, i) => `<h3>${esc(n)}</h3>${multiHTML('xp' + i, PARTS.map(([p]) => p).filter((p) => p !== 'その他'), S.settings.exParts?.[n] || [])}`).join('')}
+    <button class="btn wide" id="xp-save" style="margin-top:12px">保存</button>`);
+  $('#xp-save', sheet).onclick = () => {
+    S.settings.exParts = S.settings.exParts || {};
+    names.forEach((n, i) => {
+      const ps = readMulti(sheet, 'xp' + i);
+      if (ps.length) S.settings.exParts[n] = ps;
+      else delete S.settings.exParts[n];
+    });
+    save('settings');
+    closeSheet();
     render();
   };
 }
