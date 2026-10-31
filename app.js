@@ -10,8 +10,12 @@ const S = {};
 
 function openDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos', { keyPath: 'id' });
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -1250,6 +1254,7 @@ $('#btn-settings').onclick = () => {
 async function doBackup() {
   const data = { app: 'seicho-log', version: 1, savedAt: new Date().toISOString() };
   KEYS.forEach((k) => (data[k] = S[k]));
+  data.photos = await photosForBackup();
   const name = `seicho-log-${today()}.json`;
   const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
   try {
@@ -1282,6 +1287,7 @@ async function restore(file) {
       S[k] = data[k] ?? structuredClone(DEFAULTS[k]);
       await save(k);
     }
+    await restorePhotos(data.photos);
     closeSheet();
     toast('戻しました');
     render();
@@ -2285,6 +2291,7 @@ function openCase(id) {
       <label class="field"><span class="row" style="justify-content:space-between">うまくできたこと ${voiceBtn('k-good')}</span><textarea id="k-good">${esc(c.good)}</textarea></label>
       <label class="field"><span class="row" style="justify-content:space-between">課題 ${voiceBtn('k-issue')}</span><textarea id="k-issue">${esc(c.issue)}</textarea></label>
       <label class="field"><span class="row" style="justify-content:space-between">次はこうする ${voiceBtn('k-next')}</span><textarea id="k-next">${esc(c.next)}</textarea></label>
+      ${photoBlockHTML(c.photos || [], (c.photos || []).length ? '経過' : '術前')}
       <div class="card">
         <h2>経過</h2>
         ${c.progress.map((p) => `<div class="list-item"><div class="meta">${jpDate(p.date)}</div>${esc(p.text)}</div>`).join('') || '<p class="muted">まだありません。</p>'}
@@ -2335,6 +2342,20 @@ function openCase(id) {
       draw();
       $('.sheet').scrollTop = top;
     });
+    bindPhotoBlock(sheet, c.id, c.photos || [], (list) => {
+      readText();
+      c.mark = $('#k-mark', sheet).value;
+      c.photos = list;
+      // 保存済みの症例なら、写真の増減はすぐ記録に反映する
+      const stored = S.cases.find((x) => x.id === c.id);
+      if (stored) {
+        stored.photos = list;
+        save('cases');
+      }
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    });
     $$('[data-in]', sheet).forEach(
       (b) =>
         (b.onclick = () => {
@@ -2361,6 +2382,7 @@ function openCase(id) {
     $('#k-del', sheet)?.addEventListener('click', () => {
       if (!confirm('この症例の記録を消しますか？')) return;
       S.cases = S.cases.filter((x) => x.id !== c.id);
+      (c.photos || []).forEach((p) => photoDel(p.id));
       save('cases');
       closeSheet();
       render();
@@ -2423,6 +2445,135 @@ function openNoteCats() {
   };
 }
 
+/* ========== 写真（症例に付ける。スマホの中だけに保存） ========== */
+const PHOTO_LABELS = ['術前', '術中', '術後', '経過', 'レントゲン', 'CT', '検査表', 'その他'];
+
+function photoTx(mode, fn) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('photos', mode);
+    const r = fn(tx.objectStore('photos'));
+    tx.oncomplete = () => resolve(r?.result);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+const photoGet = (id) => photoTx('readonly', (st) => st.get(id));
+const photoPut = (rec) => photoTx('readwrite', (st) => st.put(rec));
+const photoDel = (id) => photoTx('readwrite', (st) => st.delete(id));
+const photoAll = () => photoTx('readonly', (st) => st.getAll());
+
+// 撮った写真は大きいので、長い辺を決めた大きさに縮めてから保存する
+async function shrink(file, max, quality) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement('canvas');
+  cv.width = Math.round(bmp.width * scale);
+  cv.height = Math.round(bmp.height * scale);
+  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+  bmp.close?.();
+  return new Promise((res) => cv.toBlob(res, 'image/jpeg', quality));
+}
+
+async function addPhotos(files, owner, label) {
+  const added = [];
+  for (const f of files) {
+    try {
+      const rec = { id: uid(), owner, label, date: today(), blob: await shrink(f, 1800, 0.85), thumb: await shrink(f, 360, 0.75) };
+      await photoPut(rec);
+      added.push({ id: rec.id, label, date: rec.date });
+    } catch {
+      toast('写真を読み込めませんでした');
+    }
+  }
+  return added;
+}
+
+const thumbURLs = new Map();
+async function thumbURL(id) {
+  if (!thumbURLs.has(id)) {
+    const rec = await photoGet(id);
+    if (!rec) return '';
+    thumbURLs.set(id, URL.createObjectURL(rec.thumb));
+  }
+  return thumbURLs.get(id);
+}
+
+// 症例の画面の「写真」欄。photos は [{id,label,date}]、onChange で記録側に戻す
+function photoBlockHTML(photos, label) {
+  return `<div class="card"><h2>写真 <span class="muted">${photos.length}枚</span></h2>
+    <div class="photo-grid">${photos.map((p) => `<button type="button" class="ph" data-ph="${p.id}"><img alt=""><span>${esc(p.label)}・${jpDate(p.date)}</span></button>`).join('')}</div>
+    <h3>種類</h3>${choicesHTML('phlabel', PHOTO_LABELS.map((x) => [x, x]), label)}
+    <div class="row" style="margin-top:8px">
+      <label class="btn sub grow" style="text-align:center">📷 撮る<input type="file" accept="image/*" capture="environment" data-phin hidden></label>
+      <label class="btn sub grow" style="text-align:center">🖼 選ぶ<input type="file" accept="image/*" multiple data-phin hidden></label>
+    </div>
+    <p class="muted">写真はこのスマホの中だけに保存します。患者さんの顔や名前が写らないように撮りましょう。</p></div>`;
+}
+function bindPhotoBlock(sheet, owner, photos, onChange) {
+  $$('[data-ph]', sheet).forEach(async (b) => {
+    $('img', b).src = await thumbURL(b.dataset.ph);
+    b.onclick = () => viewPhoto(b.dataset.ph, photos, onChange);
+  });
+  bindChoices(sheet, 'phlabel', () => {});
+  $$('[data-phin]', sheet).forEach(
+    (inp) =>
+      (inp.onchange = async () => {
+        if (!inp.files.length) return;
+        toast('保存しています…');
+        const label = picked(sheet, 'phlabel') || 'その他';
+        const added = await addPhotos([...inp.files], owner, label);
+        onChange([...photos, ...added]);
+      })
+  );
+}
+
+// 全画面で見る（症例の画面の上に重ねる）
+async function viewPhoto(id, photos, onChange) {
+  const rec = await photoGet(id);
+  if (!rec) return;
+  const url = URL.createObjectURL(rec.blob);
+  const ov = document.createElement('div');
+  ov.className = 'viewer';
+  ov.innerHTML = `<img src="${url}" alt="">
+    <div class="viewer-bar"><span>${esc(rec.label)}・${jpDate(rec.date)}</span>
+      <span><button class="btn ghost sm" data-vdel>削除</button> <button class="btn sm" data-vclose>閉じる</button></span></div>`;
+  const close = () => {
+    URL.revokeObjectURL(url);
+    ov.remove();
+  };
+  $('[data-vclose]', ov).onclick = close;
+  $('[data-vdel]', ov).onclick = async () => {
+    if (!confirm('この写真を消しますか？')) return;
+    await photoDel(id);
+    close();
+    onChange(photos.filter((p) => p.id !== id));
+  };
+  document.body.appendChild(ov);
+}
+
+// 保存されずに終わった記録の写真を片付ける
+async function cleanOrphanPhotos() {
+  const owners = new Set([...S.cases.map((c) => c.id), ...S.notes.map((n) => n.id)]);
+  for (const p of await photoAll()) if (!owners.has(p.owner)) await photoDel(p.id);
+}
+
+const blobToDataURL = (b) => new Promise((res) => {
+  const r = new FileReader();
+  r.onload = () => res(r.result);
+  r.readAsDataURL(b);
+});
+async function photosForBackup() {
+  const out = [];
+  for (const p of await photoAll()) out.push({ ...p, blob: await blobToDataURL(p.blob), thumb: await blobToDataURL(p.thumb) });
+  return out;
+}
+async function restorePhotos(list) {
+  await photoTx('readwrite', (st) => st.clear());
+  for (const p of list || []) {
+    await photoPut({ ...p, blob: await (await fetch(p.blob)).blob(), thumb: await (await fetch(p.thumb)).blob() });
+  }
+  thumbURLs.clear();
+}
+
 /* ========== ホーム画面に追加 ========== */
 let installPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
@@ -2478,6 +2629,7 @@ async function doInstall() {
     save('settings');
   }
   navigator.storage?.persist?.();
+  cleanOrphanPhotos().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   render();
 })();
