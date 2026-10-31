@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 21; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 22; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -3334,10 +3334,17 @@ function openPageCapture(lang = 'en', bookId = null) {
           draw();
         })
     );
-    $('#pc-go', sheet).onclick = async () => {
-      bookId = $('#pc-book', sheet).value || null;
+    $('#pc-go', sheet).onclick = () => readPages().catch((e) => showError('読み取り', e));
+    const readPages = async () => {
       const btn = $('#pc-go', sheet);
       btn.disabled = true;
+      btn.textContent = '準備しています…';
+      bookId = $('#pc-book', sheet).value || null;
+      if (!(await aiKey())) {
+        btn.disabled = false;
+        btn.textContent = `AIで読み取る（${files.length}枚）`;
+        return toast(aiErrorText(new Error('nokey')), 6000);
+      }
       // 2枚ずつに分けて同時に送る（1回の通信を軽くして、途中経過も見えるようにする）
       const groups = [];
       for (let i = 0; i < files.length; i += 2) groups.push(files.slice(i, i + 2).map((f) => f.blob));
@@ -3698,6 +3705,18 @@ async function doInstall() {
     <div class="small">表示の形：${isInstalled() ? 'アプリ' : 'ブラウザ'}</div>
     <div class="muted" style="word-break:break-all;margin-top:6px">${esc(ua)}</div>`;
 }
+
+/* ========== エラーを画面に出す（原因を調べるため） ========== */
+function showError(where, err) {
+  const msg = `${where}：${err?.name || ''} ${err?.message || err}`.slice(0, 300);
+  const box = document.createElement('div');
+  box.className = 'errbox';
+  box.innerHTML = `<b>エラーが起きました</b><div>${esc(msg)}</div><div class="small">この画面をスクリーンショットで送ってください。</div><button class="btn sm">閉じる</button>`;
+  $('button', box).onclick = () => box.remove();
+  document.body.appendChild(box);
+}
+window.addEventListener('error', (e) => showError('画面', e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => showError('処理', e.reason));
 
 /* ========== 起動 ========== */
 (async function start() {
