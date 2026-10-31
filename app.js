@@ -77,7 +77,7 @@ const DEFAULTS = {
   notes: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
-  settings: { lastBackup: null },
+  settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
 };
 
 /* ---------- 定義 ---------- */
@@ -306,6 +306,16 @@ function renderToday(v) {
         <p class="small">いちばん古いものは受注から${oldest}日です。${oldest >= LAB_LATE ? 'まず1件だけ、手をつけてみましょう。' : ''}</p>
         <button class="btn sub" data-golab>技工を見る</button></div>`);
     }
+    const late = chartPending();
+    if (late.length) {
+      notices.push(`<div class="card notice"><h2>書き終えていないカルテ ${late.length}日分</h2>
+        ${late
+          .map(
+            (d) => `<div class="row" style="justify-content:space-between;padding:4px 0"><span>${jpDate(d)} <b style="color:var(--warn)">${daysBetween(d, today())}日たっています</b></span>
+            <span class="row" style="gap:6px"><button class="btn sm" data-chartdone="${d}">書き終えた</button><button class="btn ghost sm" data-chartoff="${d}">休診</button></span></div>`
+          )
+          .join('')}</div>`);
+    }
     for (const k of caseFollowUps()) {
       notices.push(`<div class="card"><h2>経過を見る日：${esc(k.area)}${k.mark ? ` ${esc(k.mark)}` : ''}</h2>
         <p class="small">${jpDate(k.date)}の症例です。${esc(k.procedure || '')}</p>
@@ -357,6 +367,8 @@ function renderToday(v) {
       ${todayDoneHTML(date)}
     </div>
 
+    ${chartCardHTML(date)}
+
     <div class="card">
       <h2>☾ 夜のふりかえり</h2>
       <h3>仕事の調子</h3>${choicesHTML('work', marks(MARKS), d.work)}
@@ -399,6 +411,10 @@ function renderToday(v) {
   $('[data-backup]', v)?.addEventListener('click', doBackup);
   $('[data-install]', v)?.addEventListener('click', doInstall);
   bindRunningCard(v);
+  $$('[data-chartdone]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartdone, 'done')));
+  $$('[data-chartoff]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartoff, 'off')));
+  $$('[data-chartundo]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartundo, 'undo')));
+  $$('[data-charton]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.charton, 'on')));
   $('[data-golab]', v)?.addEventListener('click', () => {
     workTab = 'lab';
     $('.tabs [data-tab="consult"]').click();
@@ -424,6 +440,70 @@ function renderToday(v) {
       else openDrinkSheet(null, date);
     })
   );
+}
+
+/* ---------- カルテ ---------- */
+// 診療した日に、その日のうちにカルテを書き終えたか。遅れたら何日後だったかを残す。
+function isClinicDay(date) {
+  const d = S.days[date];
+  if (d?.chartOff) return false;
+  if (d?.chartOn) return true;
+  return (S.settings.clinicDays || []).includes(parseYmd(date).getDay());
+}
+const chartDelay = (date) => (S.days[date]?.chartDone ? daysBetween(date, S.days[date].chartDone) : null);
+// 書き終えていない診療日（カルテのチェックを使い始めた日以降、直近14日）
+function chartPending() {
+  const t = today();
+  const from = [addDays(t, -14), S.settings.chartFrom || t].sort().pop();
+  const out = [];
+  for (let d = from; d < t; d = addDays(d, 1)) if (isClinicDay(d) && !S.days[d]?.chartDone) out.push(d);
+  return out;
+}
+function setChart(date, action) {
+  const d = day(date);
+  if (action === 'done') d.chartDone = today();
+  if (action === 'undo') delete d.chartDone;
+  if (action === 'off') {
+    d.chartOff = true;
+    delete d.chartOn;
+  }
+  if (action === 'on') {
+    d.chartOn = true;
+    delete d.chartOff;
+  }
+  save('days');
+  if (action === 'done') {
+    const n = chartDelay(date);
+    toast(n === 0 ? 'その日のうちに書き終えました！' : `${jpDate(date)}のカルテ、${n}日後に書き終えました`);
+  }
+  render();
+}
+function chartCardHTML(date) {
+  if (date > today()) return '';
+  const d = S.days[date] || {};
+  if (!isClinicDay(date)) {
+    return `<div class="card"><h2>🗂 カルテ <span class="muted small">休診日</span></h2>
+      <button class="btn ghost sm" data-charton="${date}">この日は診療した</button></div>`;
+  }
+  if (d.chartDone) {
+    const n = chartDelay(date);
+    return `<div class="card${n === 0 ? ' good' : ''}"><h2>🗂 カルテ <span>${n === 0 ? '当日に書き終えた ✓' : `${n}日後に書き終えた`}</span></h2>
+      <button class="btn ghost sm" data-chartundo="${date}">取り消す</button></div>`;
+  }
+  const n = daysBetween(date, today());
+  return `<div class="card"><h2>🗂 カルテ ${n ? `<span style="color:var(--warn)">${n}日たっています</span>` : ''}</h2>
+    <div class="row"><button class="btn grow" data-chartdone="${date}">この日のカルテを書き終えた</button><button class="btn ghost sm" data-chartoff="${date}">休診日</button></div></div>`;
+}
+function chartWeekStatHTML(days) {
+  const t = today();
+  const clinic = days.filter((d) => d <= t && isClinicDay(d));
+  if (!clinic.length) return '';
+  const same = clinic.filter((d) => chartDelay(d) === 0).length;
+  const lateDays = clinic.map(chartDelay).filter((n) => n > 0);
+  const open = clinic.filter((d) => d < t && !S.days[d]?.chartDone).length;
+  const avg = lateDays.length ? Math.round((lateDays.reduce((a, b) => a + b, 0) / lateDays.length) * 10) / 10 : null;
+  return `<div class="stat"><div class="v">${same}/${clinic.length}日</div><div class="l">カルテを当日に書けた</div></div>
+    <div class="stat"><div class="v">${lateDays.length}日${open ? `＋未${open}` : ''}</div><div class="l">遅れた日${avg != null ? `（平均${avg}日後）` : ''}</div></div>`;
 }
 
 // 今日まだ書いていなくても、昨日までつながっていれば続いている日数として数える
@@ -1186,6 +1266,7 @@ function renderReview(v) {
         <div class="stat"><div class="v">${lots}日</div><div class="l">だらだら多めの日</div></div>
         <div class="stat"><div class="v">${urges}回</div><div class="l">YouTubeをがまん</div></div>
         <div class="stat"><div class="v">${days.filter((d) => S.days[d]?.diary).length}日</div><div class="l">日記を書いた</div></div>
+        ${chartWeekStatHTML(days)}
       </div>
     </div>
     ${afterDrinkHTML()}`;
@@ -1244,7 +1325,19 @@ $('#btn-settings').onclick = () => {
       <button class="btn wide" id="bk-out">保存する</button>
       <label class="btn sub wide" style="display:block;text-align:center;margin-top:8px">バックアップから戻す<input type="file" id="bk-in" accept=".json,application/json" hidden></label>
     </div>
+    <div class="card">
+      <h2>診療日</h2>
+      <p class="muted">カルテのチェックは、この曜日だけ出します。</p>
+      <div class="choices" id="cdays">${WD.map((w, i) => `<button type="button" class="choice${S.settings.clinicDays.includes(i) ? ' on' : ''}" data-wd="${i}">${w}</button>`).join('')}</div>
+    </div>
     <p class="muted">成長ログ 第1段階 ・ 記録はこのスマホの中だけに保存されています。</p>`);
+  $('#cdays', sheet).onclick = (e) => {
+    const b = e.target.closest('[data-wd]');
+    if (!b) return;
+    b.classList.toggle('on');
+    S.settings.clinicDays = $$('#cdays .choice.on', sheet).map((x) => Number(x.dataset.wd));
+    save('settings');
+  };
   $('#bk-out', sheet).onclick = doBackup;
   $('#bk-in', sheet).onchange = (e) => restore(e.target.files[0]);
 };
@@ -2781,6 +2874,12 @@ async function doInstall() {
   for (const k of KEYS) {
     const val = await dbGet(k);
     S[k] = val === undefined ? structuredClone(DEFAULTS[k]) : val;
+  }
+  if (!S.settings.clinicDays) S.settings.clinicDays = [...DEFAULTS.settings.clinicDays];
+  // カルテのチェックは、この機能を使い始めた日から数える
+  if (!S.settings.chartFrom) {
+    S.settings.chartFrom = today();
+    save('settings');
   }
   if (!S.settings.firstUse) {
     S.settings.firstUse = new Date().toISOString();
