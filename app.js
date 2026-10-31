@@ -843,8 +843,12 @@ function renderGym(v) {
   });
 }
 
+// 自重で始める種目（記録するときに「自重」が最初から選ばれる）
+const BW_DEFAULT = new Set(['懸垂', '斜め懸垂', 'ディップス', '腕立て伏せ', 'アブローラー']);
+const RPE_LIST = ['6', '6.5', '7', '7.5', '8', '8.5', '9', '9.5', '10'];
 function setText(s) {
-  return s.kg ? `${s.kg}kg×${s.reps || 0}` : `${s.reps || 0}回`;
+  const load = s.bw ? (s.kg ? `自重+${s.kg}kg` : '自重') : s.kg ? `${s.kg}kg` : '';
+  return `${load ? `${load}×${s.reps || 0}` : `${s.reps || 0}回`}${s.rpe ? ` @${s.rpe}` : ''}${s.fail ? '🔥' : ''}`;
 }
 function bestSet(e) {
   const sets = e.sets.filter((s) => s.reps);
@@ -887,7 +891,7 @@ function openWorkout(id, tplKey, date) {
   const draw = () => {
     const sheet = openSheet(esc(w.name), `
       <label class="field"><span>日付</span><input type="date" id="w-date" value="${w.date}"></label>
-      <p class="muted">重さが空欄なら自分の体重だけ（自重）として記録します。ディップスなどの加重は、付けた重りの重さを入れてください。</p>
+      <p class="muted">自重の種目は「自重」を押します。加重するときは、付けた重りの重さをkgに入れます。RPEは 10＝限界、9＝あと1回、8＝あと2回、7＝あと3回。出し切ったセットには🔥。</p>
       <div class="card" id="ex-list">
         ${w.exercises
           .map((e, ei) => {
@@ -897,10 +901,16 @@ function openWorkout(id, tplKey, date) {
               <div class="prev">${prev ? `前回 ${jpDate(prev.date)}：${prev.sets.map(setText).join(' / ')}` : '前回の記録なし'}</div>
               ${e.sets
                 .map(
-                  (s, si) => `<div class="set-row"><span class="no">${si + 1}</span>
-                  <input class="num" type="number" inputmode="decimal" placeholder="kg" value="${esc(s.kg ?? '')}" data-kg="${ei}-${si}"> kg ×
-                  <input class="num" type="number" inputmode="numeric" placeholder="回" value="${esc(s.reps ?? '')}" data-reps="${ei}-${si}"> 回
-                  <button class="btn ghost sm" data-rmset="${ei}-${si}">✕</button></div>`
+                  (s, si) => `<div class="set-box">
+                  <div class="set-row"><span class="no">${si + 1}</span>
+                    <button type="button" class="choice sm${s.bw ? ' on' : ''}" data-bw="${ei}-${si}">自重</button>
+                    ${s.bw ? '<span class="small">＋</span>' : ''}<input class="num" type="number" inputmode="decimal" placeholder="${s.bw ? '0' : 'kg'}" value="${esc(s.kg ?? '')}" data-kg="${ei}-${si}"> kg ×
+                    <input class="num" type="number" inputmode="numeric" placeholder="回" value="${esc(s.reps ?? '')}" data-reps="${ei}-${si}"> 回</div>
+                  <div class="set-row" style="padding-left:28px">
+                    <select class="rpe" data-rpe="${ei}-${si}"><option value="">RPE</option>${RPE_LIST.map((r) => `<option ${String(s.rpe) === r ? 'selected' : ''}>${r}</option>`).join('')}</select>
+                    <button type="button" class="choice sm${s.fail ? ' on' : ''}" data-fail="${ei}-${si}">🔥 出し切った</button>
+                    <button class="btn ghost sm" data-rmset="${ei}-${si}" style="margin-left:auto">✕</button></div>
+                  </div>`
                 )
                 .join('')}
               <button class="btn sub sm" data-addset="${ei}" style="margin-top:4px">＋ セット</button>
@@ -936,6 +946,10 @@ function openWorkout(id, tplKey, date) {
         const [ei, si] = i.dataset.reps.split('-').map(Number);
         w.exercises[ei].sets[si].reps = i.value === '' ? '' : Number(i.value);
       });
+      $$('[data-rpe]', sheet).forEach((i) => {
+        const [ei, si] = i.dataset.rpe.split('-').map(Number);
+        w.exercises[ei].sets[si].rpe = i.value === '' ? '' : Number(i.value);
+      });
     };
     const scroll = sheet.scrollTop;
     const redraw = () => {
@@ -951,8 +965,15 @@ function openWorkout(id, tplKey, date) {
       if (t.dataset.addset !== undefined) {
         sync();
         const ex = w.exercises[Number(t.dataset.addset)];
-        const last = ex.sets[ex.sets.length - 1] || prevOf(ex.name, w.id, w.date)?.sets[0] || { kg: '', reps: '' };
-        ex.sets.push({ kg: last.kg ?? '', reps: last.reps ?? '' });
+        const last = ex.sets[ex.sets.length - 1] || prevOf(ex.name, w.id, w.date)?.sets[0] || { kg: '', reps: '', bw: BW_DEFAULT.has(ex.name) };
+        ex.sets.push({ kg: last.kg ?? '', reps: last.reps ?? '', bw: !!last.bw });
+        redraw();
+      } else if (t.dataset.bw || t.dataset.fail) {
+        sync();
+        const [ei, si] = (t.dataset.bw || t.dataset.fail).split('-').map(Number);
+        const st = w.exercises[ei].sets[si];
+        if (t.dataset.bw) st.bw = !st.bw;
+        else st.fail = !st.fail;
         redraw();
       } else if (t.dataset.rmset) {
         sync();

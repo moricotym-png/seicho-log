@@ -177,3 +177,8 @@ input.num { width: 72px; text-align: center; padding: 8px 4px; }
 .bar { display: block; height: 10px; border-radius: 0 4px 4px 0; min-width: 2px; }
 .bar.ghost { height: 4px; background: #c9cdc9; }
 .bar-v { text-align: right; font-variant-numeric: tabular-nums; }
+
+.set-box { border-bottom: 1px dashed var(--line); padding: 4px 0; }
+.set-box:last-of-type { border-bottom: 0; }
+.choice.sm { padding: 4px 10px; font-size: 13px; }
+select.rpe { width: auto; padding: 6px 8px; font-size: 14px; }
