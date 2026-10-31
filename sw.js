@@ -1,5 +1,5 @@
 // 画面のファイルをスマホに保存して、電波がなくても開けるようにする
-const CACHE = 'seicho-log-v9';
+const CACHE = 'seicho-log-v10';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

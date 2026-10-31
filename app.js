@@ -152,12 +152,12 @@ function minutesLabel(m) {
   return m % 60 ? `${h}時間${m % 60}分` : `${h}時間`;
 }
 
-function toast(msg) {
+function toast(msg, ms = msg.includes('🏆') ? 4500 : 2200) {
   const t = $('#toast');
   t.textContent = msg;
   t.hidden = false;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.hidden = true), 2200);
+  toast.timer = setTimeout(() => (t.hidden = true), ms);
 }
 
 function day(date) {
@@ -240,7 +240,11 @@ function openSheet(title, bodyHTML, { dark = false } = {}) {
   bg.className = 'sheet-bg';
   bg.innerHTML = `<div class="sheet${dark ? ' secret' : ''}"><h2><span>${title}</span><button class="icon-btn" data-close aria-label="閉じる">✕</button></h2>${bodyHTML}</div>`;
   bg.addEventListener('click', (e) => {
-    if (e.target === bg || e.target.closest('[data-close]')) closeSheet();
+    // 閉じたら下の画面も最新にする（計測の開始・一時停止などを反映）
+    if (e.target === bg || e.target.closest('[data-close]')) {
+      closeSheet();
+      render();
+    }
   });
   document.body.appendChild(bg);
   return $('.sheet', bg);
@@ -294,10 +298,7 @@ function renderToday(v) {
         <button class="btn" data-morning="${dr.id}">翌朝チェックをする</button></div>`);
     }
     const run = labRunning();
-    if (run) {
-      notices.push(`<div class="card good"><h2>技工の作業中：${esc(labTypeName(run))} <span>${minutesLabel(runningMin(run))}</span></h2>
-        <button class="btn" data-labstop>止める</button></div>`);
-    }
+    if (run) notices.push(runningCardHTML(run));
     const waiting = S.labs.filter((j) => labState(j) === 'waiting');
     if (waiting.length) {
       const oldest = Math.max(...waiting.map((j) => daysBetween(j.ordered, today())));
@@ -397,10 +398,7 @@ function renderToday(v) {
   $$('[data-morning]', v).forEach((b) => b.addEventListener('click', () => openMorningCheck(b.dataset.morning)));
   $('[data-backup]', v)?.addEventListener('click', doBackup);
   $('[data-install]', v)?.addEventListener('click', doInstall);
-  $('[data-labstop]', v)?.addEventListener('click', () => {
-    stopLabTimer(labRunning());
-    render();
-  });
+  bindRunningCard(v);
   $('[data-golab]', v)?.addEventListener('click', () => {
     workTab = 'lab';
     $('.tabs [data-tab="consult"]').click();
@@ -1834,19 +1832,67 @@ function renderWork(v) {
 
 /* ========== 院内技工 ========== */
 // 受注 → 着手 → 作業 → 完成 を記録して、ためている件数と日数を見えるようにする。患者さんの名前は入れない。
+// 作業時間は工程ごとにストップウォッチで計り、種類×工程ごとの最速を「自己ベスト」として残す。
 const LAB_LATE = 3; // 受注からこの日数たっても未着手なら「先送り」として目立たせる
 const daysBetween = (a, b) => Math.round((parseYmd(b) - parseYmd(a)) / 864e5);
 const labType = (j) => S.labTypes.find((t) => t.id === j.typeId);
 const labTypeName = (j) => labType(j)?.name || j.typeName;
-const labMinutes = (j) => (j.sessions || []).reduce((a, s) => a + (s.min || 0), 0);
+const sessSec = (s) => s.sec ?? (s.min || 0) * 60; // 以前の記録は分単位
+const runSec = (j) => (j.running ? Math.max(0, Math.round((Date.now() - j.running) / 1000)) : 0);
+const jobSec = (j) => (j.sessions || []).reduce((a, s) => a + sessSec(s), 0);
+const stepSec = (j, i) => (j.sessions || []).filter((s) => s.step === i).reduce((a, s) => a + sessSec(s), 0);
+const labMinutes = (j) => Math.round(jobSec(j) / 60);
 function labState(j) {
   if (j.finished) return 'done';
   if (j.started) return 'doing';
   return 'waiting';
 }
 const labRunning = () => S.labs.find((j) => j.running);
-function runningMin(j) {
-  return Math.max(0, Math.round((Date.now() - j.running) / 60000));
+
+function fmtSec(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+function secLabel(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m >= 60) return minutesLabel(m);
+  return m ? `${m}分${s ? `${s}秒` : ''}` : `${s}秒`;
+}
+// data-tick を付けた表示を1秒ごとに進める（画面を描き直さずに数字だけ変える）
+setInterval(() => {
+  $$('[data-tick]').forEach((el) => {
+    el.textContent = fmtSec(Number(el.dataset.base || 0) + Math.max(0, Math.round((Date.now() - Number(el.dataset.tick)) / 1000)));
+  });
+}, 1000);
+const tickHTML = (j, base, big = false) =>
+  `<span class="${big ? 'clock' : 'mono'}" ${j.running ? `data-tick="${j.running}" data-base="${base}"` : ''}>${fmtSec(base + runSec(j))}</span>`;
+
+// 自己ベスト（同じ種類・同じ工程で、計測して完了した中でいちばん短い時間）
+function bestStep(typeId, name, excludeId) {
+  let best = null;
+  for (const j of S.labs) {
+    if (j.typeId !== typeId || j.id === excludeId) continue;
+    j.steps.forEach((s, i) => {
+      if (s.name !== name || !s.done) return;
+      const sec = stepSec(j, i);
+      if (sec > 0 && (!best || sec < best.sec)) best = { sec, date: s.doneAt || j.finished };
+    });
+  }
+  return best;
+}
+function bestTotal(typeId, excludeId) {
+  let best = null;
+  for (const j of S.labs) {
+    if (j.typeId !== typeId || j.id === excludeId || !j.finished) continue;
+    // 工程ごとに全部計ったものだけを比べる
+    if (!j.steps.every((s, i) => stepSec(j, i) > 0)) continue;
+    const sec = j.steps.reduce((a, s, i) => a + stepSec(j, i), 0);
+    if (!best || sec < best.sec) best = { sec, date: j.finished };
+  }
+  return best;
 }
 
 function labStats(list) {
@@ -1861,7 +1907,38 @@ function labStats(list) {
   };
 }
 
-let labTimer = null;
+// 計測中の大きな表示（技工の画面と「今日」の画面で使う）
+function runningCardHTML(run) {
+  const i = run.runningStep;
+  const step = run.steps[i];
+  const best = step ? bestStep(run.typeId, step.name, run.id) : null;
+  return `<div class="card good">
+    <div class="small">⏱ ${esc(labTypeName(run))}${run.mark ? ` ${esc(run.mark)}` : ''}・${esc(step?.name || '作業')}</div>
+    <div style="text-align:center;margin:6px 0">${tickHTML(run, step ? stepSec(run, i) : 0, true)}</div>
+    ${best ? `<div class="small" style="text-align:center">🏆 自己ベスト ${fmtSec(best.sec)}</div>` : ''}
+    <div class="row" style="margin-top:10px">
+      <button class="btn sub grow" data-pause="${run.id}">⏸ 一時停止</button>
+      ${step ? `<button class="btn grow" data-stepdone="${run.id}">✓ ${esc(step.name)}を完了</button>` : ''}
+    </div></div>`;
+}
+function bindRunningCard(v) {
+  $$('[data-pause]', v).forEach((b) =>
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      stopLabTimer(S.labs.find((j) => j.id === b.dataset.pause));
+      render();
+    })
+  );
+  $$('[data-stepdone]', v).forEach((b) =>
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const j = S.labs.find((x) => x.id === b.dataset.stepdone);
+      completeStep(j, j.runningStep);
+      render();
+    })
+  );
+}
+
 function renderLab(v) {
   const t = today();
   const waiting = S.labs.filter((j) => labState(j) === 'waiting').sort((a, b) => (a.ordered < b.ordered ? -1 : 1));
@@ -1881,19 +1958,14 @@ function renderLab(v) {
     else if (j.started) right = `${stepsDone}/${j.steps.length} 工程`;
     else right = `<span style="color:${age >= LAB_LATE ? 'var(--warn)' : 'inherit'};font-weight:700">受注から${age}日</span>`;
     const sub = j.finished
-      ? `着手まで${daysBetween(j.ordered, j.started)}日・作業${minutesLabel(labMinutes(j))}`
-      : `${jpDate(j.ordered)}受注${due}${labMinutes(j) ? `・作業${minutesLabel(labMinutes(j))}` : ''}`;
+      ? `着手まで${daysBetween(j.ordered, j.started)}日・作業${secLabel(jobSec(j))}${j.record ? ' 🏆' : ''}`
+      : `${jpDate(j.ordered)}受注${due}${jobSec(j) ? `・作業${secLabel(jobSec(j))}` : ''}`;
     return `<div class="list-item" data-job="${j.id}"><div class="row" style="justify-content:space-between"><b>${esc(labTypeName(j))}${j.mark ? ` <span class="muted">${esc(j.mark)}</span>` : ''}</b><span class="small">${right}</span></div>
       <div class="meta">${sub}</div></div>`;
   };
 
   v.innerHTML = `
-    ${
-      run
-        ? `<div class="card good"><h2>作業中：${esc(labTypeName(run))} <span>${minutesLabel(runningMin(run))}</span></h2>
-        <div class="row"><button class="btn grow" data-stop="${run.id}">止める</button><button class="btn sub" data-job="${run.id}">開く</button></div></div>`
-        : ''
-    }
+    ${run ? runningCardHTML(run) : ''}
     <div class="card">
       <h2>院内技工</h2>
       <div class="stats">
@@ -1913,26 +1985,29 @@ function renderLab(v) {
         <div class="stat"><div class="v">${st.late}件</div><div class="l">${LAB_LATE}日以上 先送りした</div></div>
       </div>
     </div>
+    ${recordsHTML()}
     ${labTypeTable()}
     <div class="card"><h2>完成した技工 <button class="btn ghost sm" data-types>種類を編集</button></h2>${done.slice(0, 20).map(jobRow).join('') || '<p class="muted">まだありません。</p>'}</div>`;
 
   $('[data-new]', v).onclick = () => openLabJob(null);
   $('[data-types]', v).onclick = openLabTypes;
   $$('[data-job]', v).forEach((el) => (el.onclick = () => openLabJob(el.dataset.job)));
-  $$('[data-stop]', v).forEach((el) =>
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      stopLabTimer(S.labs.find((j) => j.id === el.dataset.stop));
-      render();
+  bindRunningCard(v);
+}
+
+// 自己ベストの一覧（種類ごと・工程ごと）
+function recordsHTML() {
+  const blocks = S.labTypes
+    .map((t) => {
+      const rows = t.steps.map((name) => [name, bestStep(t.id, name, null)]).filter(([, b]) => b);
+      const total = bestTotal(t.id, null);
+      if (!rows.length) return '';
+      return `<h3>${esc(t.name)}</h3>${rows
+        .map(([name, b]) => `<div class="row small" style="justify-content:space-between;padding:2px 0"><span>${esc(name)}</span><span><b class="mono">${fmtSec(b.sec)}</b> <span class="muted">${jpDate(b.date)}</span></span></div>`)
+        .join('')}${total ? `<div class="row small" style="justify-content:space-between;padding:2px 0;border-top:1px solid var(--line)"><span>全工程の合計</span><span><b class="mono">${fmtSec(total.sec)}</b> <span class="muted">${jpDate(total.date)}</span></span></div>` : ''}`;
     })
-  );
-  // 計測中は1分ごとに表示を進める
-  clearInterval(labTimer);
-  if (run)
-    labTimer = setInterval(() => {
-      if (tab === 'consult' && workTab === 'lab' && !$('.sheet-bg')) render();
-      else if (!labRunning()) clearInterval(labTimer);
-    }, 60000);
+    .join('');
+  return blocks ? `<div class="card"><h2>🏆 自己ベスト</h2>${blocks}</div>` : '';
 }
 
 // 種類ごとの平均（これまでの完成分すべて）
@@ -1942,7 +2017,7 @@ function labTypeTable() {
     .filter(([, s]) => s.n);
   if (!rows.length) return '';
   const td = 'style="text-align:center;padding:4px 2px"';
-  return `<div class="card"><h2>種類ごと（これまで）</h2>
+  return `<div class="card"><h2>種類ごとの平均（これまで）</h2>
     <table style="width:100%;font-size:13px;border-collapse:collapse">
       <tr class="muted"><td></td><td ${td}>件数</td><td ${td}>着手まで</td><td ${td}>作業</td><td ${td}>完成まで</td></tr>
       ${rows
@@ -1956,21 +2031,45 @@ function labTypeTable() {
 function markStarted(j, date) {
   if (!j.started || date < j.started) j.started = date;
 }
-function startLabTimer(j) {
+function startLabTimer(j, step) {
   const other = labRunning();
-  if (other && other.id !== j.id) stopLabTimer(other);
+  if (other) stopLabTimer(other, true);
   j.running = Date.now();
+  j.runningStep = step;
   markStarted(j, today());
   save('labs');
 }
-function stopLabTimer(j) {
+function stopLabTimer(j, quiet = false) {
   if (!j?.running) return;
-  const min = Math.max(1, runningMin(j));
+  const sec = Math.max(1, runSec(j));
   j.sessions = j.sessions || [];
-  j.sessions.push({ date: ymd(new Date(j.running)), min });
+  j.sessions.push({ date: ymd(new Date(j.running)), sec, step: j.runningStep ?? null });
   j.running = null;
+  j.runningStep = null;
   save('labs');
-  toast(`${minutesLabel(min)}作業しました`);
+  if (!quiet) toast(`${secLabel(sec)}作業しました`);
+}
+
+// 工程を完了にする。計測していれば自己ベストと比べる
+function completeStep(j, i) {
+  if (j.running && j.runningStep === i) stopLabTimer(j, true);
+  const s = j.steps[i];
+  s.done = true;
+  s.doneAt = today();
+  markStarted(j, today());
+  const sec = stepSec(j, i);
+  let msg = `${s.name}が終わりました`;
+  if (sec > 0) {
+    const prev = bestStep(j.typeId, s.name, j.id);
+    if (!prev) msg = `${s.name} ${fmtSec(sec)}。初めての記録です`;
+    else if (sec < prev.sec) {
+      msg = `🏆 新記録！ ${s.name} ${fmtSec(sec)}（これまで ${fmtSec(prev.sec)}）`;
+      s.record = true;
+    } else msg = `${s.name} ${fmtSec(sec)}（自己ベスト ${fmtSec(prev.sec)}）`;
+  }
+  if (j.steps.every((x) => x.done) && !j.finished) return finishJob(j, msg);
+  save('labs');
+  toast(msg);
 }
 
 function openLabJob(id) {
@@ -1981,6 +2080,21 @@ function openLabJob(id) {
 
   const draw = () => {
     const t = today();
+    const stepRow = (s, i) => {
+      const best = bestStep(j.typeId, s.name, j.id);
+      const runningHere = j.running && j.runningStep === i;
+      const sec = stepSec(j, i);
+      let btn = '';
+      if (runningHere) btn = `<button type="button" class="btn sub sm" data-spause>⏸ 止める</button><button type="button" class="btn sm" data-sdone="${i}">✓ 完了</button>`;
+      else if (!s.done) btn = `<button type="button" class="btn sm" data-sgo="${i}">▶ ${sec ? '再開' : '開始'}</button>`;
+      return `<div class="step${runningHere ? ' on' : ''}">
+        <label class="row" style="gap:8px"><input type="checkbox" data-step="${i}" ${s.done ? 'checked' : ''} style="width:22px;height:22px;accent-color:var(--accent)"> <b>${esc(s.name)}</b>${s.record ? ' 🏆' : ''}</label>
+        <div class="row" style="justify-content:space-between;margin-top:4px">
+          <span>${runningHere ? tickHTML(j, sec) : `<span class="mono">${sec ? fmtSec(sec) : '--:--'}</span>`} <span class="muted small">${best ? `ベスト ${fmtSec(best.sec)}` : ''}</span></span>
+          <span class="row" style="gap:6px">${btn}</span>
+        </div></div>`;
+    };
+    const bestAll = bestTotal(j.typeId, j.id);
     const sheet = openSheet(isNew ? '受注を記録' : esc(labTypeName(j)), `
       <h3>種類</h3>${choicesHTML('ltype', S.labTypes.map((x) => [x.id, x.name]), j.typeId)}
       <div class="row">
@@ -1992,17 +2106,12 @@ function openLabJob(id) {
         isNew
           ? ''
           : `<div class="card">
-        <h2>作業時間 <span>${minutesLabel(labMinutes(j) + (j.running ? runningMin(j) : 0))}</span></h2>
-        ${
-          j.running
-            ? `<p class="small">計測中（${minutesLabel(runningMin(j))}）。アプリを閉じても計測は続きます。</p><button class="btn warn wide" id="l-stop">止める</button>`
-            : `<button class="btn wide" id="l-start">▶ 作業を始める（時間を計る）</button>`
-        }
-        <div class="row" style="margin-top:8px"><span class="small">計り忘れたとき：</span>${[10, 15, 30, 60].map((m) => `<button type="button" class="btn ghost sm" data-addmin="${m}">＋${m}分</button>`).join('')}</div>
-        ${(j.sessions || []).length ? `<p class="muted" style="margin:6px 0 0">${j.sessions.map((s) => `${jpDate(s.date)} ${s.min}分`).join('、')}</p>` : ''}
-      </div>
-      <div class="card"><h2>工程</h2>
-        ${j.steps.map((s, i) => `<label class="check"><input type="checkbox" data-step="${i}" ${s.done ? 'checked' : ''}> ${esc(s.name)}${s.doneAt ? ` <span class="muted">${jpDate(s.doneAt)}</span>` : ''}</label>`).join('')}
+        <h2>⏱ 工程ごとのタイム</h2>
+        ${j.steps.map(stepRow).join('')}
+        <div class="row" style="justify-content:space-between;margin-top:10px"><b>合計</b><span>${j.running ? tickHTML(j, jobSec(j)) : `<span class="mono">${fmtSec(jobSec(j))}</span>`} <span class="muted small">${bestAll ? `ベスト ${fmtSec(bestAll.sec)}` : ''}</span></span></div>
+        <p class="muted">アプリを閉じても計測は続きます。</p>
+        <div class="row"><span class="small">計り忘れたとき：</span>${[10, 15, 30, 60].map((m) => `<button type="button" class="btn ghost sm" data-addmin="${m}">＋${m}分</button>`).join('')}</div>
+        <p class="muted" style="margin:4px 0 0">あとから足した時間は合計には入りますが、自己ベストの比べっこには入りません。</p>
       </div>
       <p class="small">${
         j.finished
@@ -2015,18 +2124,20 @@ function openLabJob(id) {
       <label class="field"><span class="row" style="justify-content:space-between">メモ ${voiceBtn('l-note')}</span><textarea id="l-note">${esc(j.note)}</textarea></label>
       <div class="row">
         <button class="btn grow" id="l-save">${isNew ? '記録' : '保存'}</button>
-        ${isNew ? '' : j.finished ? '<button class="btn sub" id="l-reopen">完成を取り消す</button>' : '<button class="btn sub" id="l-done">完成！</button>'}
+        ${isNew ? '<button class="btn sub" id="l-now">記録してすぐ始める</button>' : j.finished ? '<button class="btn sub" id="l-reopen">完成を取り消す</button>' : '<button class="btn sub" id="l-done">完成！</button>'}
         ${isNew ? '' : '<button class="btn ghost" id="l-del">削除</button>'}
       </div>`);
 
     const sync = () => {
       const tid = picked(sheet, 'ltype') || j.typeId;
-      if (tid !== j.typeId && !j.steps.some((s) => s.done)) {
+      if (tid !== j.typeId && !j.steps.some((s) => s.done) && !jobSec(j) && !j.running) {
         const tp = S.labTypes.find((x) => x.id === tid);
         j.steps = tp.steps.map((name) => ({ name, done: false }));
+        j.typeId = tid;
+      } else if (tid !== j.typeId) {
+        toast('作業を始めたあとは種類を変えられません');
       }
-      j.typeId = tid;
-      j.typeName = S.labTypes.find((x) => x.id === tid)?.name || j.typeName;
+      j.typeName = labType(j)?.name || j.typeName;
       j.ordered = $('#l-ord', sheet).value || j.ordered;
       j.due = $('#l-due', sheet).value;
       j.mark = $('#l-mark', sheet).value;
@@ -2038,28 +2149,38 @@ function openLabJob(id) {
       save('labs');
     };
     const redraw = () => {
+      if (!$('.sheet')) return render();
       const top = $('.sheet').scrollTop;
       draw();
       $('.sheet').scrollTop = top;
     };
     bindChoices(sheet, 'ltype', () => {});
-    $('#l-start', sheet)?.addEventListener('click', () => {
-      commit();
-      startLabTimer(j);
-      closeSheet();
-      toast('計測を始めました。終わったら「止める」を押してください');
-      render();
-    });
-    $('#l-stop', sheet)?.addEventListener('click', () => {
+    $$('[data-sgo]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          commit();
+          startLabTimer(j, Number(b.dataset.sgo));
+          redraw();
+        })
+    );
+    $('[data-spause]', sheet)?.addEventListener('click', () => {
       commit();
       stopLabTimer(j);
       redraw();
     });
+    $$('[data-sdone]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          commit();
+          completeStep(j, Number(b.dataset.sdone));
+          redraw();
+        })
+    );
     $$('[data-addmin]', sheet).forEach(
       (b) =>
         (b.onclick = () => {
           commit();
-          j.sessions.push({ date: today(), min: Number(b.dataset.addmin) });
+          j.sessions.push({ date: today(), sec: Number(b.dataset.addmin) * 60, step: null });
           markStarted(j, today());
           save('labs');
           redraw();
@@ -2068,15 +2189,14 @@ function openLabJob(id) {
     $$('[data-step]', sheet).forEach((c) =>
       c.addEventListener('change', () => {
         commit();
-        const s = j.steps[Number(c.dataset.step)];
-        s.done = c.checked;
-        s.doneAt = c.checked ? today() : null;
-        if (c.checked) markStarted(j, today());
-        if (j.steps.every((x) => x.done) && !j.finished) {
-          finishJob(j);
-          return;
+        const i = Number(c.dataset.step);
+        if (c.checked) completeStep(j, i);
+        else {
+          j.steps[i].done = false;
+          j.steps[i].doneAt = null;
+          j.steps[i].record = false;
+          save('labs');
         }
-        save('labs');
         redraw();
       })
     );
@@ -2086,6 +2206,12 @@ function openLabJob(id) {
       toast(isNew ? '受注を記録しました。早めに着手しましょう' : '保存しました');
       render();
     };
+    $('#l-now', sheet)?.addEventListener('click', () => {
+      commit();
+      startLabTimer(j, 0);
+      closeSheet();
+      render();
+    });
     $('#l-done', sheet)?.addEventListener('click', () => {
       commit();
       finishJob(j);
@@ -2107,8 +2233,8 @@ function openLabJob(id) {
   draw();
 }
 
-function finishJob(j) {
-  if (j.running) stopLabTimer(j);
+function finishJob(j, stepMsg) {
+  if (j.running) stopLabTimer(j, true);
   const t = today();
   j.steps.forEach((s) => {
     if (!s.done) {
@@ -2117,11 +2243,19 @@ function finishJob(j) {
     }
   });
   markStarted(j, t);
+  // 全工程の合計タイムが自己ベストか（工程を全部計ったときだけ）
+  const prev = bestTotal(j.typeId, j.id);
+  const allTimed = j.steps.every((s, i) => stepSec(j, i) > 0);
+  const total = j.steps.reduce((a, s, i) => a + stepSec(j, i), 0);
+  j.record = allTimed && (!prev || total < prev.sec);
   j.finished = t;
   save('labs');
   closeSheet();
   const d = daysBetween(j.ordered, j.finished);
-  toast(d <= 1 ? `受注から${d}日で完成！すばやいです` : `完成！受注から${d}日でした`);
+  let msg = d <= 1 ? `完成！受注から${d}日、すばやいです` : `完成！受注から${d}日でした`;
+  if (allTimed && prev && total < prev.sec) msg = `🏆 合計タイムの新記録！ ${fmtSec(total)}（これまで ${fmtSec(prev.sec)}）`;
+  else if (stepMsg?.startsWith('🏆')) msg = stepMsg + '／完成！';
+  toast(msg);
   render();
 }
 
