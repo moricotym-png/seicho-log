@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 22; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 23; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -1642,7 +1642,7 @@ $('#btn-settings').onclick = () => {
     </div>
     <div class="card">
       <h2>AIの鍵</h2>
-      <p class="muted">写真から単語を読み取るときに使います。Anthropic社のサイトで作った「APIキー」を貼り付けてください。このスマホの中だけに保存し、バックアップにも入れません。</p>
+      <p class="muted">今はClaudeのアプリで読み取る形にしているので、入れなくても大丈夫です（将来、アプリから直接AIを呼ぶときに使います）。</p>
       <div class="row"><input type="password" id="ai-key" class="grow" placeholder="sk-ant-..." autocomplete="off"><button class="btn sm" id="ai-save">保存</button></div>
       <p class="small" id="ai-state"></p>
     </div>
@@ -3247,7 +3247,7 @@ const PAGE_PROMPT = {
    - meaning_en: a short, simple English definition (learner's dictionary style).
    - sentence: the full sentence from the page that contains it, copied exactly.
    - note: one short Japanese line on nuance, common collocations, or a confusable word. Empty string if nothing useful.
-3. Write 3 comprehension questions in English about the content of this page, each with 4 English choices. "answer" is the 0-based index of the correct choice. explanation_ja explains the answer in one or two short Japanese sentences and points to where in the text it is. Test understanding of the argument, not trivia. Do not summarize the page anywhere.
+3. Write 3 comprehension questions in English about the content of this page, each with 4 English choices. "answer" is the 0-based index of the correct choice. explanation_ja explains the answer in one or two short Japanese sentences and points to where in the text it is. Test understanding of the argument, not trivia. Do not put a summary of the page into the questions or notes.
 
 The reader is a Japanese dentist reading at about CEFR C1.`,
   ja: `これは読書中の日本語の本（純文学など）のページの写真です。読者は分からない言葉に線を引いています。
@@ -3303,77 +3303,85 @@ function aiErrorText(e) {
 }
 
 /* ========== ページの写真から言葉を取り込む ========== */
+// Claudeのアプリ（定額プラン）で読み取ってもらい、返事を貼り付けて取り込む。追加料金はかからない。
+const CHAT_FORMAT = `
+
+最後に、成長ログ（私の記録アプリ）に取り込むためのまとめを、次の形のJSONだけで、\`\`\`json のコードブロック1つにまとめて出してください。キーの名前は変えないでください。
+{"words":[{"word":"","surface":"","reading":"","pos":"","meaning_ja":"","meaning_en":"","sentence":"","note":""}],"questions":[{"question":"","choices":["","","",""],"answer":0,"explanation_ja":""}]}`;
+const chatPrompt = (lang) => PAGE_PROMPT[lang] + CHAT_FORMAT;
+
+// 貼り付けた返事から JSON を取り出す（コードブロックがあればその中、なければ最初の { から最後の } まで）
+function parseChatReply(text) {
+  const block = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  let body = block ? block[1] : text;
+  const a = body.indexOf('{');
+  const b = body.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error('nojson');
+  const data = JSON.parse(body.slice(a, b + 1));
+  const str = (v) => (v == null ? '' : String(v));
+  const words = (Array.isArray(data.words) ? data.words : [])
+    .filter((w) => w && (w.word || w.surface))
+    .map((w) => ({ word: str(w.word || w.surface), surface: str(w.surface || w.word), reading: str(w.reading), pos: str(w.pos), meaning_ja: str(w.meaning_ja || w.meaning), meaning_en: str(w.meaning_en), sentence: str(w.sentence), note: str(w.note) }));
+  const questions = (Array.isArray(data.questions) ? data.questions : [])
+    .filter((q) => q && q.question && Array.isArray(q.choices))
+    .map((q) => ({ question: str(q.question), choices: q.choices.map(str), answer: Number(q.answer) || 0, explanation_ja: str(q.explanation_ja) }));
+  return { words, questions };
+}
+
 function openPageCapture(lang = 'en', bookId = null) {
   const books = S.books.filter((b) => (lang === 'en' ? b.genre === '洋書' : b.genre !== '洋書') && b.status !== 'done');
-  const files = [];
-  const draw = () => {
-    const sheet = openSheet(lang === 'en' ? '洋書のページを取り込む' : '本のページを取り込む', `
-      <p class="small">線を引いたページを撮ってください。AIが線の引かれた言葉を見つけて、意味と例文を手帳に入れます${lang === 'en' ? '。内容の確認クイズも作ります' : ''}。</p>
-      <label class="field"><span>本</span><select id="pc-book"><option value="">（選ばない）</option>${books
-        .map((b) => `<option value="${b.id}" ${b.id === bookId ? 'selected' : ''}>${esc(b.title)}</option>`)
-        .join('')}</select></label>
-      <div class="photo-grid" id="pc-thumbs">${files.map((f, i) => `<div class="ph"><img src="${f.url}" alt=""><span>${i + 1}枚目</span></div>`).join('')}</div>
-      <div class="row" style="margin-top:8px">
-        <label class="btn sub grow" style="text-align:center">📷 撮る<input type="file" accept="image/*" capture="environment" data-pcin hidden></label>
-        <label class="btn sub grow" style="text-align:center">🖼 選ぶ<input type="file" accept="image/*" multiple data-pcin hidden></label>
-      </div>
-      <button class="btn wide" id="pc-go" style="margin-top:12px" ${files.length ? '' : 'disabled'}>AIで読み取る（${files.length}枚）</button>
-      <p class="muted">写真はAI（Anthropic社のClaude）に送られます。本のページ以外は写さないようにしてください。</p>`);
-    $$('[data-pcin]', sheet).forEach(
-      (inp) =>
-        (inp.onchange = async () => {
-          bookId = $('#pc-book', sheet).value || null;
-          for (const f of inp.files) {
-            try {
-              const blob = await shrink(f, 1600, 0.8);
-              files.push({ blob, url: URL.createObjectURL(blob) });
-            } catch {
-              toast('写真を読み込めませんでした');
-            }
-          }
-          draw();
-        })
-    );
-    $('#pc-go', sheet).onclick = () => readPages().catch((e) => showError('読み取り', e));
-    const readPages = async () => {
-      const btn = $('#pc-go', sheet);
-      btn.disabled = true;
-      btn.textContent = '準備しています…';
-      bookId = $('#pc-book', sheet).value || null;
-      if (!(await aiKey())) {
-        btn.disabled = false;
-        btn.textContent = `AIで読み取る（${files.length}枚）`;
-        return toast(aiErrorText(new Error('nokey')), 6000);
-      }
-      // 2枚ずつに分けて同時に送る（1回の通信を軽くして、途中経過も見えるようにする）
-      const groups = [];
-      for (let i = 0; i < files.length; i += 2) groups.push(files.slice(i, i + 2).map((f) => f.blob));
-      let done = 0;
-      const show = () => (btn.textContent = `読み取っています… ${done}/${groups.length}（1〜2分ほど）`);
-      show();
-      const results = await Promise.allSettled(
-        groups.map((g) =>
-          aiReadPage(g, lang).then((r) => {
-            done++;
-            show();
-            return r;
-          })
-        )
-      );
-      const ok = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
-      if (!ok.length) {
-        btn.disabled = false;
-        btn.textContent = `AIで読み取る（${files.length}枚）`;
-        return toast(aiErrorText(results[0].reason), 6000);
-      }
-      const failed = results.length - ok.length;
-      if (failed) toast(`${failed * 2}枚ほど読み取れませんでした。読み取れた分だけ出します`, 5000);
-      files.forEach((f) => URL.revokeObjectURL(f.url));
-      // 内容クイズは多すぎないように、全体で5問まで
-      openPageResult({ words: ok.flatMap((r) => r.words || []), questions: ok.flatMap((r) => r.questions || []).slice(0, 5) }, lang, bookId);
-    };
+  const sheet = openSheet(lang === 'en' ? '洋書のページを取り込む' : '本のページを取り込む', `
+    <label class="field"><span>本</span><select id="pc-book"><option value="">（選ばない）</option>${books
+      .map((b) => `<option value="${b.id}" ${b.id === bookId ? 'selected' : ''}>${esc(b.title)}</option>`)
+      .join('')}</select></label>
+    <div class="card">
+      <h2>Claudeのアプリで読み取る</h2>
+      <ol class="small" style="padding-left:20px;margin:0 0 10px">
+        <li>下の「① 頼む文章をコピー」を押す</li>
+        <li>Claudeのアプリで、線を引いたページの写真を付けて、文章を貼り付けて送る（内容について話したり質問したりしてもOK）</li>
+        <li>返事の最後のまとめ（コード欄）の右上のコピーボタンを押す</li>
+        <li>ここに戻って「② 貼り付けて取り込む」を押す</li>
+      </ol>
+      <button class="btn sub wide" id="pc-copy">① 頼む文章をコピー</button>
+      <button class="btn wide" id="pc-paste" style="margin-top:8px">② 貼り付けて取り込む</button>
+      <details style="margin-top:10px"><summary class="small">うまく貼り付けられないとき</summary>
+        <textarea id="pc-text" placeholder="ここにClaudeの返事を貼り付けてください" style="margin-top:6px;min-height:100px"></textarea>
+        <button class="btn sub wide" id="pc-take" style="margin-top:6px">この内容で取り込む</button>
+      </details>
+    </div>`);
+  const take = (text) => {
+    try {
+      const out = parseChatReply(text);
+      if (!out.words.length && !out.questions.length) return toast('取り込める言葉が見つかりませんでした', 4000);
+      openPageResult({ words: out.words, questions: out.questions.slice(0, 5) }, lang, $('#pc-book', sheet).value || null);
+    } catch {
+      toast('まとめの部分が見つかりませんでした。返事の最後のコード欄をコピーしてください', 5000);
+    }
   };
-  draw();
+  $('#pc-copy', sheet).onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(chatPrompt(lang));
+      toast('コピーしました。Claudeのアプリに貼り付けてください', 3500);
+    } catch {
+      $('#pc-text', sheet).closest('details').open = true;
+      $('#pc-text', sheet).value = chatPrompt(lang);
+      $('#pc-text', sheet).select();
+      toast('自動でコピーできませんでした。下の文章を長押ししてコピーしてください', 5000);
+    }
+  };
+  $('#pc-paste', sheet).onclick = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text.trim()) return toast('コピーされた内容がありません', 3500);
+      take(text);
+    } catch {
+      $('#pc-text', sheet).closest('details').open = true;
+      $('#pc-text', sheet).value = '';
+      $('#pc-text', sheet).focus();
+      toast('下の欄に長押しで貼り付けて、「この内容で取り込む」を押してください', 5000);
+    }
+  };
+  $('#pc-take', sheet).onclick = () => take($('#pc-text', sheet).value);
 }
 
 function openPageResult(out, lang, bookId) {
