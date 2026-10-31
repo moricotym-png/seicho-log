@@ -88,18 +88,47 @@ const AMOUNTS = ['ちょうどいい', '少し多い', '多すぎ'];
 const DAWDLE = [['none', 'なし'], ['some', '少し'], ['lots', '多い']];
 const SAVINGS = [['conbini', 'コンビニに行かなかった'], ['bottle', '水筒を持っていった'], ['bento', 'お弁当にした']];
 const TEMPLATES = {
-  sun: { name: '日曜 ジム', place: 'gym', exercises: ['スクワット', 'ベンチプレス', '懸垂', 'ディップス'] },
-  tue: { name: '火曜 パーソナル', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'デッドリフト', 'ラットプルダウン', 'アームカール', '加重腕立て'] },
+  sun: { name: '日曜 ジム（＋Push）', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'オーバーヘッドプレス', 'インクラインベンチプレス', 'ディップス'] },
+  tue: { name: '火曜 パーソナル（＋Pull）', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'デッドリフト', '懸垂', 'ラットプルダウン', 'アームカール'] },
   free: { name: 'ジム（自由）', place: 'gym', exercises: [] },
-  clinic: { name: 'クリニック', place: 'clinic', exercises: ['ブルガリアンスクワット', '斜め懸垂', 'ダンベルロウ', 'ショルダープレス', 'アブローラー'] },
+  cpush: { name: 'クリニック Push', place: 'clinic', ppl: 'push', exercises: ['ショルダープレス', 'サイドレイズ', '腕立て伏せ', 'フレンチプレス'] },
+  cpull: { name: 'クリニック Pull', place: 'clinic', ppl: 'pull', exercises: ['斜め懸垂', 'ダンベルロウ', 'リアレイズ', 'ダンベルカール'] },
+  clegs: { name: 'クリニック Legs', place: 'clinic', ppl: 'legs', exercises: ['ブルガリアンスクワット', 'ルーマニアンデッドリフト', 'カーフレイズ', 'アブローラー'] },
 };
+const PPL = [['push', 'Push', '胸・肩・三頭'], ['pull', 'Pull', '背中・二頭'], ['legs', 'Legs', '脚・お尻']];
+// 種目 → Push / Pull / Legs（腹筋などはどれにも入れない）
+const EX_PPL = {
+  ベンチプレス: 'push', インクラインベンチプレス: 'push', ダンベルプレス: 'push', 腕立て伏せ: 'push', 加重腕立て: 'push', ディップス: 'push',
+  オーバーヘッドプレス: 'push', ショルダープレス: 'push', サイドレイズ: 'push', フレンチプレス: 'push',
+  懸垂: 'pull', 斜め懸垂: 'pull', ラットプルダウン: 'pull', ダンベルロウ: 'pull', リアレイズ: 'pull', アームカール: 'pull', ダンベルカール: 'pull', デッドリフト: 'pull',
+  スクワット: 'legs', ブルガリアンスクワット: 'legs', レッグプレス: 'legs', ルーマニアンデッドリフト: 'legs', カーフレイズ: 'legs',
+};
+function pplOf(name) {
+  if (EX_PPL[name]) return EX_PPL[name];
+  const p = partsOf(name)[0];
+  return { 胸: 'push', 肩: 'push', 背中: 'pull', 脚: 'legs' }[p] || null;
+}
+// その週の Push / Pull / Legs のセット数
+function weekPPL(ws) {
+  const out = { push: 0, pull: 0, legs: 0 };
+  for (const w of weekWorkouts(ws)) for (const e of w.exercises) {
+    const k = pplOf(e.name);
+    if (k) out[k] += e.sets.filter((s) => s.reps).length;
+  }
+  return out;
+}
+// クリニックの日のおすすめ：その週にいちばん少ないもの
+function clinicPick(ws) {
+  const c = weekPPL(ws);
+  return ['pull', 'push', 'legs'].sort((a, b) => c[a] - c[b])[0];
+}
 // 週に何回やりたいか（ジムの高重量のメイン種目）
 const LIFT_GOALS = [
   ['ベンチプレス', 2],
   ['スクワット', 2],
   ['デッドリフト', 1],
 ];
-const placeOf = (w) => TEMPLATES[w.tpl]?.place || 'gym';
+const placeOf = (w) => (w.tpl === 'clinic' ? 'clinic' : TEMPLATES[w.tpl]?.place || 'gym'); // 'clinic' は以前のメニュー
 // その週に、その種目を1セット以上やった日数
 function liftDays(ws, name) {
   return new Set(weekWorkouts(ws).filter((w) => w.exercises.some((e) => e.name === name && e.sets.some((s) => s.reps))).map((w) => w.date)).size;
@@ -737,10 +766,12 @@ function renderGym(v) {
   const n = weekWorkouts(ws).length;
   const nGym = weekWorkouts(ws).filter((w) => placeOf(w) === 'gym').length;
   const nClinic = n - nGym;
+  const pick = clinicPick(ws);
+  const ppl = weekPPL(ws);
   const tplBtns = (place) =>
     Object.entries(TEMPLATES)
       .filter(([, t2]) => t2.place === place)
-      .map(([k, t2]) => `<button class="btn sub grow" data-tpl="${k}">${t2.name}</button>`)
+      .map(([k, t2]) => `<button class="btn ${t2.ppl === pick ? '' : 'sub '}grow" data-tpl="${k}">${t2.name}${t2.ppl === pick ? ' ★' : ''}</button>`)
       .join('');
   const sorted = [...S.workouts].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.created - a.created));
   const lastBody = [...S.body].sort((a, b) => (a.date < b.date ? 1 : -1))[0];
@@ -754,6 +785,8 @@ function renderGym(v) {
         return `<div class="row" style="justify-content:space-between;padding:4px 0"><span>${name}</span>
           <span>${[...Array(goal)].map((_, i) => (i < d ? '●' : '○')).join(' ')} <b style="color:${d >= goal ? 'var(--accent)' : 'inherit'}">${d}/${goal}${d >= goal ? ' ✓' : ''}</b></span></div>`;
       }).join('')}
+      <h3>今週の Push / Pull / Legs（セット数）</h3>
+      <div class="stats" style="grid-template-columns:repeat(3,1fr)">${PPL.map(([k, l, d]) => `<div class="stat"><div class="v">${ppl[k]}</div><div class="l">${l}（${d}）</div></div>`).join('')}</div>
     </div>
     <div class="card">
       <h2>今週の筋トレ <span>${n}回</span></h2>
@@ -765,10 +798,11 @@ function renderGym(v) {
     ${balanceHTML()}
     <div class="card">
       <h2>トレーニングを始める</h2>
-      <h3>🏋️ ジム（高重量・30分）</h3>
+      <h3>🏋️ ジム（バーベル高重量・日曜90分／火曜60分）</h3>
       <div class="row">${tplBtns('gym')}</div>
-      <h3>🏥 クリニック（ダンベル）</h3>
+      <h3>🏥 クリニック（ダンベル・30分）</h3>
       <div class="row">${tplBtns('clinic')}</div>
+      <p class="muted" style="margin:6px 0 0">★ 今週いちばん少ない ${PPL.find((x) => x[0] === pick)[1]} がおすすめです。</p>
       <button class="btn ghost wide" style="margin-top:8px" data-skip>飲み会などで行けなかった日を記録</button>
     </div>
     <div class="card">
@@ -1037,6 +1071,12 @@ const EX_PARTS = {
   サイドレイズ: ['肩'],
   アームカール: ['腕'],
   アブローラー: ['腹'],
+  オーバーヘッドプレス: ['肩'],
+  リアレイズ: ['肩'],
+  フレンチプレス: ['腕'],
+  ダンベルカール: ['腕'],
+  ルーマニアンデッドリフト: ['脚'],
+  カーフレイズ: ['脚'],
 };
 const partsOf = (name) => S.settings.exParts?.[name] || EX_PARTS[name] || ['その他'];
 let balanceMonth = null;
