@@ -2393,41 +2393,65 @@ function openCase(id) {
 
 function openNote(id) {
   const existing = id ? S.notes.find((n) => n.id === id) : null;
-  const n = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), date: today(), cat: null, title: '', what: '', cause: '', how: '', prevent: '', minutes: '' };
+  const n = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), date: today(), cat: null, title: '', what: '', cause: '', how: '', prevent: '', minutes: '', photos: [] };
   const field = (key, label, ph = '') =>
     `<label class="field"><span class="row" style="justify-content:space-between">${label} ${voiceBtn('n-' + key)}</span><textarea id="n-${key}" placeholder="${ph}">${esc(n[key])}</textarea></label>`;
-  const sheet = openSheet(existing ? '気づき・トラブル' : '気づき・トラブルを記録', `
-    <label class="field"><span>日付</span><input type="date" id="n-date" value="${n.date}"></label>
-    <h3>分類</h3>${choicesHTML('ncat', S.noteCats.map((x) => [x, x]), n.cat)}
-    <label class="field"><span>ひとことで</span><input type="text" id="n-title" value="${esc(n.title)}" placeholder="例：#46 遠心根 NiTiファイル先端の除去"></label>
-    ${field('what', '何が起きたか')}
-    ${field('cause', '原因（分かる範囲で）')}
-    ${field('how', 'どう対処したか（使った道具・手順）', '例：超音波チップ＋マイクロスコープで周囲を削合 → ...')}
-    ${field('prevent', '次から防ぐには・次はこうする')}
-    <label class="field"><span>かかった時間（任意）</span><input type="number" inputmode="numeric" class="num" id="n-min" value="${esc(n.minutes)}"> 分</label>
-    <div class="row"><button class="btn grow" id="n-save">保存</button>${existing ? '<button class="btn ghost" id="n-del">削除</button>' : ''}</div>`);
-  bindChoices(sheet, 'ncat', () => {});
-  $('#n-save', sheet).onclick = () => {
-    n.date = $('#n-date', sheet).value || n.date;
-    n.cat = picked(sheet, 'ncat') || 'その他';
-    n.title = $('#n-title', sheet).value.trim();
-    ['what', 'cause', 'how', 'prevent'].forEach((k) => (n[k] = $('#n-' + k, sheet).value));
-    n.minutes = $('#n-min', sheet).value;
-    const i = S.notes.findIndex((x) => x.id === n.id);
-    if (i >= 0) S.notes[i] = n;
-    else S.notes.push(n);
-    save('notes');
-    closeSheet();
-    toast('残しました。次の自分が助かります');
-    render();
+
+  const draw = () => {
+    const sheet = openSheet(existing ? '気づき・トラブル' : '気づき・トラブルを記録', `
+      <label class="field"><span>日付</span><input type="date" id="n-date" value="${n.date}"></label>
+      <h3>分類</h3>${choicesHTML('ncat', S.noteCats.map((x) => [x, x]), n.cat)}
+      <label class="field"><span>ひとことで</span><input type="text" id="n-title" value="${esc(n.title)}" placeholder="例：#46 遠心根 NiTiファイル先端の除去"></label>
+      ${field('what', '何が起きたか')}
+      ${field('cause', '原因（分かる範囲で）')}
+      ${field('how', 'どう対処したか（使った道具・手順）', '例：超音波チップ＋マイクロスコープで周囲を削合 → ...')}
+      ${field('prevent', '次から防ぐには・次はこうする')}
+      <label class="field"><span>かかった時間（任意）</span><input type="number" inputmode="numeric" class="num" id="n-min" value="${esc(n.minutes)}"> 分</label>
+      ${photoBlockHTML(n.photos || [], (n.photos || []).length ? '術後' : 'レントゲン')}
+      <div class="row"><button class="btn grow" id="n-save">保存</button>${existing ? '<button class="btn ghost" id="n-del">削除</button>' : ''}</div>`);
+
+    const sync = () => {
+      n.date = $('#n-date', sheet).value || n.date;
+      n.cat = picked(sheet, 'ncat');
+      n.title = $('#n-title', sheet).value.trim();
+      ['what', 'cause', 'how', 'prevent'].forEach((k) => (n[k] = $('#n-' + k, sheet).value));
+      n.minutes = $('#n-min', sheet).value;
+    };
+    bindChoices(sheet, 'ncat', () => {});
+    bindPhotoBlock(sheet, n.id, n.photos || [], (list) => {
+      sync();
+      n.photos = list;
+      // 保存済みの記録なら、写真の増減はすぐ記録に反映する
+      const stored = S.notes.find((x) => x.id === n.id);
+      if (stored) {
+        stored.photos = list;
+        save('notes');
+      }
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    });
+    $('#n-save', sheet).onclick = () => {
+      sync();
+      n.cat = n.cat || 'その他';
+      const i = S.notes.findIndex((x) => x.id === n.id);
+      if (i >= 0) S.notes[i] = n;
+      else S.notes.push(n);
+      save('notes');
+      closeSheet();
+      toast('残しました。次の自分が助かります');
+      render();
+    };
+    $('#n-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この記録を消しますか？')) return;
+      S.notes = S.notes.filter((x) => x.id !== n.id);
+      (n.photos || []).forEach((p) => photoDel(p.id));
+      save('notes');
+      closeSheet();
+      render();
+    });
   };
-  $('#n-del', sheet)?.addEventListener('click', () => {
-    if (!confirm('この記録を消しますか？')) return;
-    S.notes = S.notes.filter((x) => x.id !== n.id);
-    save('notes');
-    closeSheet();
-    render();
-  });
+  draw();
 }
 
 function openNoteCats() {
