@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 24; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 25; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -459,7 +459,7 @@ function renderToday(v) {
   $('[data-backup]', v)?.addEventListener('click', doBackup);
   $('[data-install]', v)?.addEventListener('click', doInstall);
   bindRunningCard(v);
-  $('[data-wquiz]', v)?.addEventListener('click', openWordQuiz);
+  $('[data-wquiz]', v)?.addEventListener('click', openQuizMenu);
   $$('[data-chartdone]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartdone, 'done')));
   $$('[data-chartoff]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartoff, 'off')));
   $$('[data-chartundo]', v).forEach((b) => b.addEventListener('click', () => setChart(b.dataset.chartundo, 'undo')));
@@ -2310,6 +2310,7 @@ function secLabel(sec) {
 }
 // data-tick を付けた表示を1秒ごとに進める（画面を描き直さずに数字だけ変える）
 setInterval(() => {
+  $$('[data-left]').forEach((el) => (el.textContent = fmtSec(Math.max(0, Math.round((Number(el.dataset.left) - Date.now()) / 1000)))));
   $$('[data-tick]').forEach((el) => {
     el.textContent = fmtSec(Number(el.dataset.base || 0) + Math.max(0, Math.round((Date.now() - Number(el.dataset.tick)) / 1000)));
   });
@@ -3535,23 +3536,56 @@ function gradeWord(w, ok) {
   w.stats = { right: (w.stats?.right || 0) + (ok ? 1 : 0), wrong: (w.stats?.wrong || 0) + (ok ? 0 : 1) };
 }
 
-function openWordQuiz() {
-  let queue = shuffle(dueWords()).slice(0, 20);
-  if (!queue.length) return toast('今日の復習は終わっています');
-  const total = queue.length;
+// 気分に合わせて、時間と言葉の種類を選んでから始める
+const QUIZ_TIMES = [['1', 'さっと1分'], ['3', '3分'], ['5', '5分'], ['10', 'じっくり10分'], ['0', '全部']];
+function openQuizMenu() {
+  const due = dueWords();
+  if (!due.length) return toast('今日の復習は終わっています');
+  const nEn = due.filter((w) => w.lang === 'en').length;
+  const nJa = due.length - nEn;
+  const last = S.settings.quizPick || {};
+  const sheet = openSheet('復習クイズ', `
+    <p class="small">今日の復習は <b>${due.length}語</b>（英語${nEn}・日本語${nJa}）です。</p>
+    <h3>時間</h3>${choicesHTML('qtime', QUIZ_TIMES, last.min ?? '3')}
+    <h3>言葉</h3>${choicesHTML('qlang', [['all', 'ぜんぶ'], ['en', '英語だけ'], ['ja', '日本語だけ']], last.lang || 'all')}
+    <button class="btn wide" id="q-go" style="margin-top:12px">始める</button>
+    <p class="muted">時間が来たら、その問題で終わります。残った言葉は次に回ります。<br>正解した言葉は 翌日 → 3日後 → 1週間後 → 2週間後 → 1か月後 → 2か月後 → 4か月後 と間をあけて出し、間違えた言葉は翌日にもう一度出します。</p>`);
+  bindChoices(sheet, 'qtime', () => {});
+  bindChoices(sheet, 'qlang', () => {});
+  $('#q-go', sheet).onclick = () => {
+    const min = picked(sheet, 'qtime') ?? '3';
+    const lang = picked(sheet, 'qlang') || 'all';
+    S.settings.quizPick = { min, lang };
+    save('settings');
+    openWordQuiz({ min: Number(min), lang });
+  };
+}
+
+function openWordQuiz({ min = 0, lang = 'all' } = {}) {
+  let queue = shuffle(dueWords().filter((w) => lang === 'all' || w.lang === lang));
+  if (!min) queue = queue.slice(0, 50);
+  if (!queue.length) return toast('選んだ言葉の復習は終わっています');
+  const endAt = min ? Date.now() + min * 60000 : null;
+  let total = queue.length;
+  let asked = 0;
   let right = 0;
   const missed = new Set();
   const next = () => {
-    if (!queue.length) {
+    const timeUp = endAt && Date.now() >= endAt;
+    if (!queue.length || timeUp) {
       save('words');
-      openSheet('復習クイズ', `<div class="card good"><h2>${total}語 おわり！</h2>
-        <p class="small">一度で正解：${right}語${missed.size ? `／もう一度：${missed.size}語（明日また出ます）` : ''}</p></div>
+      const left = new Set(queue.filter((w) => !missed.has(w.id)).map((w) => w.id)).size;
+      openSheet('復習クイズ', `<div class="card good"><h2>${timeUp ? '時間です！' : 'おわり！'} ${asked}問</h2>
+        <p class="small">一度で正解：${right}語${missed.size ? `／もう一度：${missed.size}語（明日また出ます）` : ''}${left ? `／残り${left}語は次に回します` : ''}</p></div>
         <button class="btn wide" data-close>閉じる</button>`);
       return;
     }
+    asked++;
     const w = queue.shift();
     const q = makeQuestion(w);
-    const head = `<div class="muted small">${total - queue.length}/${total}・${w.lang === 'en' ? '英語' : '日本語'}${w.source ? `・${esc(w.source)}` : ''}</div>`;
+    const head = `<div class="row muted small" style="justify-content:space-between"><span>${asked}問目・${w.lang === 'en' ? '英語' : '日本語'}${w.source ? `・${esc(w.source)}` : ''}</span>${
+      endAt ? `<span>残り <b class="mono" data-left="${endAt}">${fmtSec(Math.max(0, Math.round((endAt - Date.now()) / 1000)))}</b></span>` : `<span>残り${queue.length + 1}語</span>`
+    }</div>`;
     const finish = (ok) => {
       if (!missed.has(w.id)) {
         gradeWord(w, ok);
@@ -3630,7 +3664,7 @@ function renderWords(v) {
             .join('')
         : '<p class="muted">まだありません。</p>'
     }</div>`;
-  $('[data-quiz]', v).onclick = openWordQuiz;
+  $('[data-quiz]', v).onclick = openQuizMenu;
   $('[data-add]', v).onclick = () => openWord(null);
   $$('[data-cap]', v).forEach((b) => (b.onclick = () => openPageCapture(b.dataset.cap)));
   $$('[data-rq]', v).forEach((b) => (b.onclick = () => openReadQuiz(b.dataset.rq)));
