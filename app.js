@@ -1532,6 +1532,10 @@ $('#btn-settings').onclick = () => {
       <label class="btn sub wide" style="display:block;text-align:center;margin-top:8px">バックアップから戻す<input type="file" id="bk-in" accept=".json,application/json" hidden></label>
     </div>
     <div class="card">
+      <h2>保存している量</h2>
+      <div id="usage"><p class="muted">計算しています…</p></div>
+    </div>
+    <div class="card">
       <h2>AIの鍵</h2>
       <p class="muted">写真から単語を読み取るときに使います。Anthropic社のサイトで作った「APIキー」を貼り付けてください。このスマホの中だけに保存し、バックアップにも入れません。</p>
       <div class="row"><input type="password" id="ai-key" class="grow" placeholder="sk-ant-..." autocomplete="off"><button class="btn sm" id="ai-save">保存</button></div>
@@ -1543,6 +1547,7 @@ $('#btn-settings').onclick = () => {
       <div class="choices" id="cdays">${WD.map((w, i) => `<button type="button" class="choice${S.settings.clinicDays.includes(i) ? ' on' : ''}" data-wd="${i}">${w}</button>`).join('')}</div>
     </div>
     <p class="muted">成長ログ 第1段階 ・ 記録はこのスマホの中だけに保存されています。</p>`);
+  showUsage($('#usage', sheet));
   aiKey().then((k) => ($('#ai-state', sheet).textContent = k ? `保存済み（…${k.slice(-4)}）` : 'まだ入っていません'));
   $('#ai-save', sheet).onclick = async () => {
     const k = $('#ai-key', sheet).value.trim();
@@ -1562,6 +1567,29 @@ $('#btn-settings').onclick = () => {
   $('#bk-out', sheet).onclick = doBackup;
   $('#bk-in', sheet).onchange = (e) => restore(e.target.files[0]);
 };
+
+// 設定画面の「保存している量」
+async function showUsage(box) {
+  const mb = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)}GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : n ? `${Math.max(1, Math.round(n / 1e3))}KB` : "0KB");
+  const text = new Blob([JSON.stringify(KEYS.map((k) => S[k]))]).size;
+  let photoN = 0;
+  let photoSize = 0;
+  try {
+    for (const p of await photoAll()) {
+      photoN++;
+      photoSize += (p.blob?.size || 0) + (p.thumb?.size || 0);
+    }
+  } catch {}
+  const est = await navigator.storage?.estimate?.().catch(() => null);
+  const kept = await navigator.storage?.persisted?.().catch(() => false);
+  const from = S.settings.firstUse ? jpDate(ymd(new Date(S.settings.firstUse))) : '';
+  box.innerHTML = `
+    <div class="row small" style="justify-content:space-between"><span>文字の記録${from ? `（${from}から）` : ''}</span><b>${mb(text)}</b></div>
+    <div class="row small" style="justify-content:space-between"><span>写真 ${photoN}枚</span><b>${mb(photoSize)}</b></div>
+    ${est?.quota ? `<div class="row small" style="justify-content:space-between"><span>このアプリ全体／使える上限</span><b>${mb(est.usage || 0)}／${mb(est.quota)}</b></div>
+    <div class="meter"><i style="width:${Math.max(1, Math.min(100, ((est.usage || 0) / est.quota) * 100))}%"></i></div>` : ''}
+    <p class="muted" style="margin:6px 0 0">${kept ? '容量が足りなくなっても、勝手に消されない設定になっています。' : 'スマホの容量が足りなくなると消される可能性があります。ホーム画面に追加すると守られやすくなります。'}週1回のバックアップは続けてください。</p>`;
+}
 
 async function doBackup() {
   const data = { app: 'seicho-log', version: 1, savedAt: new Date().toISOString() };
