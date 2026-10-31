@@ -1,4 +1,5 @@
 'use strict';
+const APP_VERSION = 20; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -1650,7 +1651,7 @@ $('#btn-settings').onclick = () => {
       <p class="muted">カルテのチェックは、この曜日だけ出します。</p>
       <div class="choices" id="cdays">${WD.map((w, i) => `<button type="button" class="choice${S.settings.clinicDays.includes(i) ? ' on' : ''}" data-wd="${i}">${w}</button>`).join('')}</div>
     </div>
-    <p class="muted">成長ログ 第1段階 ・ 記録はこのスマホの中だけに保存されています。</p>`);
+    <p class="muted">成長ログ 版${APP_VERSION} ・ 記録はこのスマホの中だけに保存されています。</p>`);
   showUsage($('#usage', sheet));
   aiKey().then((k) => ($('#ai-state', sheet).textContent = k ? `保存済み（…${k.slice(-4)}）` : 'まだ入っていません'));
   $('#ai-save', sheet).onclick = async () => {
@@ -3701,6 +3702,18 @@ async function doInstall() {
   }
   navigator.storage?.persist?.();
   cleanOrphanPhotos().catch(() => {});
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // 新しい版が入ったら、1回だけ自動で読み込み直す
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloaded || $('.sheet-bg')) return;
+      reloaded = true;
+      location.reload();
+    });
+    navigator.serviceWorker
+      .register('sw.js', { updateViaCache: 'none' })
+      .then((reg) => reg.update())
+      .catch(() => {});
+  }
   render();
 })();
