@@ -1087,7 +1087,7 @@ function openCardio(id) {
     <label class="field"><span>日付</span><input type="date" id="cd-date" value="${c.date}"></label>
     <h3>種類</h3>${choicesHTML('cdkind', CARDIO.map(([k, l]) => [k, l]), c.kind)}
     <h3>時間</h3>
-    <div class="row">${choicesHTML('cdmin', [10, 15, 20, 30, 45, 60].map((m) => [String(m), `${m}分`]), String(c.min))}
+    <div class="row">${choicesHTML('cdmin', [5, 10, 15, 20, 30, 45, 60].map((m) => [String(m), `${m}分`]), String(c.min))}
       <input type="number" inputmode="numeric" class="num" id="cd-min" value="${c.min}"> 分</div>
     <label class="check"><input type="checkbox" id="cd-fast" ${c.fasted ? 'checked' : ''}> 空腹時（朝食の前）</label>
     <div class="row">
