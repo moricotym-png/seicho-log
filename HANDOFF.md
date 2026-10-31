@@ -29,7 +29,7 @@
 - バックアップ：設定の「保存する」で JSON を作り、共有画面から Google ドライブへ（写真は base64 で同梱）。
 
 ### `KEYS`（app.js 7行目）
-days, drinks, workouts, body, books, readLogs, engLogs, words, readQs, consults, treatments,
+days, drinks, workouts, cardio, body, books, readLogs, engLogs, words, readQs, consults, treatments,
 labs, labTypes, cases, notes, noteCats, secret, settings
 
 ## 画面と機能（下のタブ）
@@ -38,7 +38,8 @@ labs, labTypes, cases, notes, noteCats, secret, settings
 - **飲み会**：種類ごとの杯数、月ごとの回数、翌朝チェックリスト
 - **筋トレ**：PPLベース（日曜ジム＋Push、火曜パーソナル＋Pull、クリニック Push/Pull/Legs）。
   メイン種目の週の回数（ベンチ2・スクワット2・デッド1）、今週のPPLセット数とクリニックのおすすめ★、
-  部位のバランス（月カレンダー＋部位ごとのセット数の棒グラフ）、セットごとに 自重／kg／回／RPE／🔥出し切った、体の感覚
+  部位のバランス（月カレンダー＋部位ごとのセット数の棒グラフ）、セットごとに 自重／kg／回／RPE／🔥出し切った、体の感覚、
+  有酸素（ウォーキング〜ランニング、空腹時、(METs−1)×体重×時間で消費kcal、体脂肪1kg≒7,200kcalで脂肪g換算）
 - **学び**：英語（時間・4技能・ページ取り込み）、読書（本棚・15分ごとのつぶやき）、言葉の手帳
   （写真→AIで線を引いた語を取り込み、間隔をあけた復習クイズ、洋書は内容の4択クイズ）
 - **仕事**：相談（コンサルテーション。金額は暗号化）、院内技工（工程ごとのストップウォッチ・自己ベスト・先送り日数）、

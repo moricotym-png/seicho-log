@@ -4,7 +4,7 @@
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -43,6 +43,7 @@ const DEFAULTS = {
   days: {},
   drinks: [],
   workouts: [],
+  cardio: [],
   body: [],
   books: [
     { id: 'b1', title: '奔馬（豊饒の海 第2部）', genre: '小説', status: 'reading', progress: '' },
@@ -581,6 +582,8 @@ function todayDoneHTML(date) {
   if (eng) items.push(`英語 ${minutesLabel(eng)}`);
   if (rd) items.push(`読書 ${minutesLabel(rd)}`);
   if (wo.length) items.push(`筋トレ ${wo.map((w) => w.name).join('・')}`);
+  const cd = S.cardio.filter((c) => c.date === date);
+  if (cd.length) items.push(`有酸素 ${cd.reduce((a, c) => a + c.min, 0)}分`);
   if (dr.length) items.push(`飲み会 ${dr.reduce((a, x) => a + totalCups(x), 0)}杯`);
   return items.length ? `<p class="small" style="margin:10px 0 0">この日の記録：${items.map(esc).join(' ／ ')}</p>` : '';
 }
@@ -795,6 +798,7 @@ function renderGym(v) {
       <div class="meter-marks"><span>0</span><span>2 合格</span><span>3 良い</span><span>5 最高</span></div>
       <p class="small" style="margin:8px 0 0">${msg}</p>
     </div>
+    ${cardioWeekHTML(ws)}
     ${balanceHTML()}
     <div class="card">
       <h2>トレーニングを始める</h2>
@@ -828,6 +832,8 @@ function renderGym(v) {
   $$('[data-tpl]', v).forEach((b) => (b.onclick = () => openWorkout(null, b.dataset.tpl, t)));
   $('[data-skip]', v).onclick = () => openSkip(t);
   bindBalance(v);
+  $('[data-cardio]', v).onclick = () => openCardio(null);
+  $$('[data-cd]', v).forEach((el) => (el.onclick = () => openCardio(el.dataset.cd)));
   $('[data-body]', v).onclick = openBody;
   $$('[data-open]', v).forEach((el) => {
     el.onclick = () => {
@@ -870,8 +876,9 @@ function prevOf(name, beforeId, date) {
 function openWorkoutStart(date) {
   const sheet = openSheet('どのメニュー？', `<div class="row">${Object.entries(TEMPLATES)
     .map(([k, t]) => `<button class="btn sub grow" data-tpl="${k}">${t.name}</button>`)
-    .join('')}</div>`);
+    .join('')}</div><button class="btn wide" data-cardio2 style="margin-top:10px">🏃 有酸素（ウォーキング・ジョギング）</button>`);
   $$('[data-tpl]', sheet).forEach((b) => (b.onclick = () => openWorkout(null, b.dataset.tpl, date)));
+  $('[data-cardio2]', sheet).onclick = () => openCardio(null);
 }
 
 function openWorkout(id, tplKey, date) {
@@ -1037,6 +1044,103 @@ function openSkip(date) {
     toast('記録しました。次の機会にいきましょう');
     render();
   };
+}
+
+/* ---------- 有酸素（ウォーキング・ジョギング） ---------- */
+// 消費カロリーは「(METs − 1) × 体重kg × 時間」で、安静にしていた分を引いた“運動で増えた分”の目安。
+// 脂肪の重さは「体脂肪1kg ≒ 7,200kcal」で換算した目安。
+const CARDIO = [
+  ['walk', 'ウォーキング', 3.5],
+  ['brisk', '早歩き', 4.3],
+  ['jog', 'ジョギング', 7.0],
+  ['run', 'ランニング', 9.0],
+];
+function bodyWeight() {
+  const last = [...S.body].filter((b) => b.weight).sort((a, b) => (a.date < b.date ? 1 : -1))[0];
+  return last?.weight || S.settings.weight || null;
+}
+const cardioKcal = (kind, min, kg) => Math.round((CARDIO.find((c) => c[0] === kind)[2] - 1) * kg * (min / 60));
+const fatGrams = (kcal) => Math.round(kcal / 7.2);
+
+function cardioWeekHTML(ws) {
+  const list = S.cardio.filter((c) => c.date >= ws && c.date <= addDays(ws, 6));
+  const min = list.reduce((a, c) => a + c.min, 0);
+  const kcal = list.reduce((a, c) => a + (c.kcal || 0), 0);
+  const recent = [...S.cardio].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.created - a.created)).slice(0, 5);
+  return `<div class="card">
+    <h2>有酸素 <button class="btn sub sm" data-cardio>＋ 記録</button></h2>
+    <div class="stats" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat"><div class="v">${minutesLabel(min)}</div><div class="l">今週の合計</div></div>
+      <div class="stat"><div class="v">${kcal}</div><div class="l">kcal（目安）</div></div>
+      <div class="stat"><div class="v">${fatGrams(kcal)}g</div><div class="l">脂肪に換算</div></div>
+    </div>
+    ${recent.map((c) => `<div class="list-item" data-cd="${c.id}"><div class="row" style="justify-content:space-between"><b>${jpDate(c.date)} ${esc(CARDIO.find((x) => x[0] === c.kind)?.[1] || '')} ${c.min}分</b><span class="small">${c.kcal}kcal・脂肪${fatGrams(c.kcal)}g</span></div>
+      <div class="meta">${c.fasted ? '空腹時' : ''}${c.km ? `${c.fasted ? '・' : ''}${c.km}km` : ''}</div></div>`).join('')}
+  </div>`;
+}
+
+function openCardio(id) {
+  const existing = id ? S.cardio.find((c) => c.id === id) : null;
+  const c = existing ? { ...existing } : { id: uid(), created: Date.now(), date: today(), kind: 'jog', min: 20, fasted: new Date().getHours() < 10, km: '' };
+  const kg0 = bodyWeight();
+  const sheet = openSheet(existing ? '有酸素' : '有酸素を記録', `
+    <label class="field"><span>日付</span><input type="date" id="cd-date" value="${c.date}"></label>
+    <h3>種類</h3>${choicesHTML('cdkind', CARDIO.map(([k, l]) => [k, l]), c.kind)}
+    <h3>時間</h3>
+    <div class="row">${choicesHTML('cdmin', [10, 15, 20, 30, 45, 60].map((m) => [String(m), `${m}分`]), String(c.min))}
+      <input type="number" inputmode="numeric" class="num" id="cd-min" value="${c.min}"> 分</div>
+    <label class="check"><input type="checkbox" id="cd-fast" ${c.fasted ? 'checked' : ''}> 空腹時（朝食の前）</label>
+    <div class="row">
+      <label class="field grow"><span>距離（任意）</span><input type="number" inputmode="decimal" id="cd-km" value="${esc(c.km)}" placeholder="km"></label>
+      <label class="field grow"><span>体重（計算用）</span><input type="number" inputmode="decimal" id="cd-kg" value="${esc(kg0 ?? '')}" placeholder="kg"></label>
+    </div>
+    <div class="card good" id="cd-est"></div>
+    <div class="row"><button class="btn grow" id="cd-save">保存</button>${existing ? '<button class="btn ghost" id="cd-del">削除</button>' : ''}</div>
+    <p class="muted">消費カロリーと脂肪の量は、運動の強さ（METs）と体重から出した目安です。</p>`);
+  const est = () => {
+    const kind = picked(sheet, 'cdkind') || c.kind;
+    const min = Number($('#cd-min', sheet).value) || 0;
+    const kg = Number($('#cd-kg', sheet).value) || 0;
+    if (!kg) return ($('#cd-est', sheet).innerHTML = '<p class="small" style="margin:0">体重を入れると、消費カロリーの目安が出ます。</p>');
+    const kcal = cardioKcal(kind, min, kg);
+    $('#cd-est', sheet).innerHTML = `<b>約${kcal}kcal</b>（脂肪に換算すると約${fatGrams(kcal)}g）`;
+  };
+  bindChoices(sheet, 'cdkind', est);
+  bindChoices(sheet, 'cdmin', (m) => {
+    if (m) $('#cd-min', sheet).value = m;
+    est();
+  });
+  $('#cd-min', sheet).oninput = est;
+  $('#cd-kg', sheet).oninput = est;
+  est();
+  $('#cd-save', sheet).onclick = () => {
+    const kg = Number($('#cd-kg', sheet).value) || 0;
+    c.date = $('#cd-date', sheet).value || c.date;
+    c.kind = picked(sheet, 'cdkind') || c.kind;
+    c.min = Number($('#cd-min', sheet).value) || 0;
+    c.fasted = $('#cd-fast', sheet).checked;
+    c.km = $('#cd-km', sheet).value;
+    c.kcal = kg ? cardioKcal(c.kind, c.min, kg) : 0;
+    if (!c.min) return toast('時間を入れてください');
+    if (kg && kg !== bodyWeight()) {
+      S.settings.weight = kg;
+      save('settings');
+    }
+    const i = S.cardio.findIndex((x) => x.id === c.id);
+    if (i >= 0) S.cardio[i] = c;
+    else S.cardio.push(c);
+    save('cardio');
+    closeSheet();
+    toast(c.kcal ? `おつかれさまです！約${c.kcal}kcal、脂肪約${fatGrams(c.kcal)}g分です` : '記録しました');
+    render();
+  };
+  $('#cd-del', sheet)?.addEventListener('click', () => {
+    if (!confirm('この記録を消しますか？')) return;
+    S.cardio = S.cardio.filter((x) => x.id !== c.id);
+    save('cardio');
+    closeSheet();
+    render();
+  });
 }
 
 function openBody() {
