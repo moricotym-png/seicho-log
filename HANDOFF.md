@@ -56,6 +56,8 @@ labs, labTypes, cases, notes, noteCats, secret, settings
 - ページの読み取りは **Claudeのアプリ（先生の定額プラン）** で行う：成長ログで頼む文章をコピー →
   Claudeのアプリに写真と一緒に貼る → 返事の最後の ```json のまとめをコピー → 成長ログで貼り付けて取り込む。
   APIを直接呼ぶ仕組み（`aiReadPage`、設定の「AIの鍵」）は残してあるが、今は使っていない（追加料金を避けるため）。
+  Claudeのアプリ側の共通ルール（プロジェクトの指示に貼る文）は `docs/claude-chat-rule.md`。
+  返事の形を変えるときは、このファイル・`PAGE_PROMPT`・`parseChatReply` の3つをそろえる。
 
 ## 作業の約束
 - **前の記録がそのまま読めること**を毎回確かめる（項目は足すだけにして、古い形でも動くように）。
