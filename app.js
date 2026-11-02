@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 27; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 28; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -3755,7 +3755,7 @@ function openWord(id) {
 // 写真で登録し、5段階評価と読後のコメントを残す。参考文献からたどった文献は「孫引き」としてつなげる。
 const PAPER_KINDS = ['雑誌の記事', '英語論文', '日本語論文', '書籍', 'セミナー資料'];
 const PAPER_STATUS = [['want', '読む予定'], ['get', '取り寄せ中'], ['printed', '印刷済み'], ['done', '読了']];
-const PAPER_TAGS = ['もう一度読む', '臨床にすぐ活かせる', '発表・講演の材料', '読む価値なし'];
+const PAPER_TAGS = ['もう一度読む', '臨床にすぐ活かせる', '発表・講演の材料', 'あまり参考にならなかった'];
 const PAPER_THEMES = ['審美補綴', '接着修復', 'フルマウス', 'ワイヤー矯正', 'マウスピース矯正', 'インプラント', '再生療法', '軟組織マネジメント', 'デジタル機器', '経営', 'スタッフ'];
 let paperFilter = 'all';
 let paperTheme = '';
@@ -4177,6 +4177,8 @@ window.addEventListener('unhandledrejection', (e) => showError('処理', e.reaso
     S[k] = val === undefined ? structuredClone(DEFAULTS[k]) : val;
   }
   if (!S.settings.clinicDays) S.settings.clinicDays = [...DEFAULTS.settings.clinicDays];
+  // 文献のタグ「読む価値なし」は「あまり参考にならなかった」に名前を変えた
+  S.papers.forEach((x) => (x.tags = (x.tags || []).map((t) => (t === '読む価値なし' ? 'あまり参考にならなかった' : t))));
   // カルテのチェックは、この機能を使い始めた日から数える
   if (!S.settings.chartFrom) {
     S.settings.chartFrom = today();
