@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION = 26; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 27; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -79,6 +79,7 @@ const DEFAULTS = {
   cases: [],
   notes: [],
   chores: [],
+  papers: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
@@ -365,6 +366,11 @@ function renderToday(v) {
           )
           .join('')}</div>`);
     }
+    for (const pa of paperTryAsks()) {
+      notices.push(`<div class="card"><h2>臨床で試しましたか？</h2>
+        <p class="small">${jpDate(pa.readOn)}に読んだ「${esc(pa.title.slice(0, 40))}」に「臨床にすぐ活かせる」を付けていました。</p>
+        <div class="row"><button class="btn" data-tried="${pa.id}">試した</button><button class="btn ghost" data-trylater="${pa.id}">まだ（1週間後にまた聞く）</button></div></div>`);
+    }
     const chDue = choreOpen().filter((c) => c.due && c.due <= today());
     if (chDue.length) {
       const worst = Math.max(...chDue.map((c) => daysBetween(c.due, today())));
@@ -477,6 +483,25 @@ function renderToday(v) {
     $('.tabs [data-tab="consult"]').click();
   });
   $$('[data-case]', v).forEach((b) => b.addEventListener('click', () => openCase(b.dataset.case)));
+  $$('[data-tried]', v).forEach((b) =>
+    b.addEventListener('click', () => {
+      const pa = S.papers.find((x) => x.id === b.dataset.tried);
+      pa.tried = today();
+      save('papers');
+      toast('すばらしい！結果は文献のコメントに書き足しておきましょう', 4000);
+      workTab = 'papers';
+      $('.tabs [data-tab="consult"]').click();
+      openPaper(pa.id);
+    })
+  );
+  $$('[data-trylater]', v).forEach((b) =>
+    b.addEventListener('click', () => {
+      const pa = S.papers.find((x) => x.id === b.dataset.trylater);
+      pa.askOn = addDays(today(), 7);
+      save('papers');
+      render();
+    })
+  );
   $('[data-gochores]', v)?.addEventListener('click', () => {
     workTab = 'chores';
     $('.tabs [data-tab="consult"]').click();
@@ -2278,7 +2303,7 @@ function openTreatmentMenu() {
 /* ========== 仕事（相談・院内技工） ========== */
 let workTab = 'consult';
 function renderWork(v) {
-  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['chores', '雑務']], workTab)}</div><div id="work-body"></div>`;
+  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['papers', '文献'], ['chores', '雑務']], workTab)}</div><div id="work-body"></div>`;
   bindChoices(v, 'work', (x) => {
     workTab = x || workTab;
     render();
@@ -2287,6 +2312,7 @@ function renderWork(v) {
   if (workTab === 'lab') renderLab(body);
   else if (workTab === 'clinic') renderClinic(body);
   else if (workTab === 'chores') renderChores(body);
+  else if (workTab === 'papers') renderPapers(body);
   else renderConsult(body);
 }
 
@@ -3171,7 +3197,7 @@ async function viewPhoto(id, photos, onChange) {
 
 // 保存されずに終わった記録の写真を片付ける
 async function cleanOrphanPhotos() {
-  const owners = new Set([...S.cases.map((c) => c.id), ...S.notes.map((n) => n.id)]);
+  const owners = new Set([...S.cases.map((c) => c.id), ...S.notes.map((n) => n.id), ...S.papers.map((x) => x.id)]);
   for (const p of await photoAll()) if (!owners.has(p.owner)) await photoDel(p.id);
 }
 
@@ -3723,6 +3749,241 @@ function openWord(id) {
     closeSheet();
     render();
   });
+}
+
+/* ========== 文献（雑誌の記事・論文） ========== */
+// 写真で登録し、5段階評価と読後のコメントを残す。参考文献からたどった文献は「孫引き」としてつなげる。
+const PAPER_KINDS = ['雑誌の記事', '英語論文', '日本語論文', '書籍', 'セミナー資料'];
+const PAPER_STATUS = [['want', '読む予定'], ['get', '取り寄せ中'], ['printed', '印刷済み'], ['done', '読了']];
+const PAPER_TAGS = ['もう一度読む', '臨床にすぐ活かせる', '発表・講演の材料', '読む価値なし'];
+const PAPER_THEMES = ['審美補綴', '接着修復', 'フルマウス', 'ワイヤー矯正', 'マウスピース矯正', 'インプラント', '再生療法', '軟組織マネジメント', 'デジタル機器', '経営', 'スタッフ'];
+let paperFilter = 'all';
+let paperTheme = '';
+let paperQuery = '';
+const stars = (n) => (n ? '★'.repeat(n) + '☆'.repeat(5 - n) : '');
+
+// 「臨床にすぐ活かせる」を付けて読み終えた文献は、1週間後に「試しましたか？」と聞く
+function paperTryAsks() {
+  const t = today();
+  return S.papers.filter((p) => p.status === 'done' && (p.tags || []).includes('臨床にすぐ活かせる') && !p.tried && (p.askOn || addDays(p.readOn || t, 7)) <= t);
+}
+
+const PAPER_PROMPT = `この写真は、歯科の文献（雑誌の記事・論文・書籍など）の表紙か最初のページです。書誌情報を読み取って、次の形のJSONだけを \`\`\`json のコードブロック1つで出してください。分からない項目は空文字にしてください。要約はいりません。
+{"paper":{"title":"","authors":"","journal":"","year":"","kind":"雑誌の記事／英語論文／日本語論文／書籍／セミナー資料のどれか","lang":"en か ja","themes":["次から当てはまるもの：${PAPER_THEMES.join('、')}"]}}`;
+
+function parsePaperReply(text) {
+  const block = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = block ? block[1] : text;
+  const a = body.indexOf('{');
+  const b = body.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error('nojson');
+  const d = JSON.parse(body.slice(a, b + 1));
+  return d.paper || d;
+}
+
+function renderPapers(v) {
+  const t = today();
+  const q = paperQuery.trim().toLowerCase();
+  const list = S.papers
+    .filter((p) => paperFilter === 'all' || (paperFilter === 'done' ? p.status === 'done' : p.status !== 'done'))
+    .filter((p) => !paperTheme || (p.themes || []).includes(paperTheme))
+    .filter((p) => !q || JSON.stringify([p.title, p.authors, p.journal, p.comment, p.themes]).toLowerCase().includes(q))
+    .sort((a, b) => (a.status === 'done' && b.status === 'done' ? (a.readOn < b.readOn ? 1 : -1) : b.created - a.created));
+  const toRead = S.papers.filter((p) => p.status !== 'done').length;
+  const monthDone = S.papers.filter((p) => p.status === 'done' && monthKey(p.readOn || '') === monthKey(t)).length;
+  const kids = (id) => S.papers.filter((p) => p.parent === id).length;
+  v.innerHTML = `
+    <div class="card">
+      <h2>文献</h2>
+      <div class="stats"><div class="stat"><div class="v">${toRead}件</div><div class="l">読む予定・取り寄せ中</div></div><div class="stat"><div class="v">${monthDone}件</div><div class="l">今月読み終えた</div></div></div>
+      <button class="btn wide" data-newpaper style="margin-top:10px">＋ 文献を登録する（写真）</button>
+    </div>
+    <input type="text" id="pp-q" placeholder="🔍 探す（題名、著者、コメント）" value="${esc(paperQuery)}" style="margin-bottom:8px">
+    <div class="subtabs">${choicesHTML('ppf', [['all', 'すべて'], ['todo', '読む予定'], ['done', '読了']], paperFilter)}</div>
+    <select id="pp-theme" style="margin-bottom:10px"><option value="">テーマ：すべて</option>${PAPER_THEMES.map((x) => `<option ${x === paperTheme ? 'selected' : ''}>${x}</option>`).join('')}</select>
+    <div class="card">${
+      list
+        .map(
+          (p) => `<div class="list-item" data-paper="${p.id}">
+          <div class="row" style="justify-content:space-between;align-items:flex-start"><b class="grow">${esc(p.title || '（題名なし）')}</b><span class="small" style="color:var(--warn);white-space:nowrap">${stars(p.rating)}</span></div>
+          <div class="meta">${esc([p.authors, p.journal, p.year].filter(Boolean).join(' ・ '))}</div>
+          <div class="meta">${esc(PAPER_STATUS.find((s) => s[0] === p.status)?.[1] || '')}${(p.themes || []).length ? ` ・ ${esc(p.themes.join('、'))}` : ''}${p.parent ? ' ・ ↳孫引き' : ''}${kids(p.id) ? ` ・ 参考文献から${kids(p.id)}件` : ''}</div>
+          ${(p.tags || []).length ? `<div class="meta">🏷 ${esc(p.tags.join('、'))}</div>` : ''}
+        </div>`
+        )
+        .join('') || '<p class="muted">なし</p>'
+    }</div>`;
+  $('[data-newpaper]', v).onclick = () => openPaper(null);
+  $$('[data-paper]', v).forEach((el) => (el.onclick = () => openPaper(el.dataset.paper)));
+  bindChoices(v, 'ppf', (x) => {
+    paperFilter = x || 'all';
+    render();
+  });
+  $('#pp-theme', v).onchange = (e) => {
+    paperTheme = e.target.value;
+    render();
+  };
+  const qi = $('#pp-q', v);
+  qi.oninput = () => {
+    paperQuery = qi.value;
+    render();
+    const again = $('#pp-q');
+    again.focus();
+    again.setSelectionRange(again.value.length, again.value.length);
+  };
+}
+
+function openPaper(id, parentId = null) {
+  const existing = id ? S.papers.find((p) => p.id === id) : null;
+  const p = existing
+    ? structuredClone(existing)
+    : { id: uid(), created: Date.now(), title: '', authors: '', journal: '', year: '', kind: '雑誌の記事', lang: 'ja', themes: [], status: 'want', rating: 0, tags: [], comment: '', readOn: '', minutes: '', parent: parentId, photos: [] };
+  const parent = p.parent ? S.papers.find((x) => x.id === p.parent) : null;
+  const children = S.papers.filter((x) => x.parent === p.id);
+
+  const draw = () => {
+    const sheet = openSheet(existing ? '文献' : parent ? '参考文献から登録' : '文献を登録', `
+      ${parent ? `<p class="small">↳ 「${esc(parent.title)}」の参考文献から</p>` : ''}
+      ${photoBlockHTML(p.photos || [], 'その他')}
+      <div class="card">
+        <h2>題名などをClaudeで読み取る</h2>
+        <p class="muted" style="margin:0 0 8px">① を押してClaudeのアプリに写真と一緒に送り、返事のコード欄をコピーして ② を押すと、下の欄に入ります（手で入れてもOK）。</p>
+        <div class="row"><button type="button" class="btn sub grow" id="pp-copy">① 頼む文章をコピー</button><button type="button" class="btn sub grow" id="pp-paste">② 貼り付ける</button></div>
+      </div>
+      <label class="field"><span>題名</span><textarea id="pp-title" style="min-height:56px">${esc(p.title)}</textarea></label>
+      <label class="field"><span>著者</span><input type="text" id="pp-auth" value="${esc(p.authors)}"></label>
+      <div class="row">
+        <label class="field grow"><span>雑誌・出典</span><input type="text" id="pp-jour" value="${esc(p.journal)}"></label>
+        <label class="field" style="width:90px"><span>年</span><input type="text" inputmode="numeric" id="pp-year" value="${esc(p.year)}"></label>
+      </div>
+      <h3>種類</h3>${choicesHTML('ppkind', PAPER_KINDS.map((x) => [x, x]), p.kind)}
+      <h3>テーマ</h3>${multiHTML('pptheme', PAPER_THEMES, p.themes)}
+      <h3>状態</h3>${choicesHTML('ppst', PAPER_STATUS, p.status)}
+      <div class="card" style="margin-top:12px">
+        <h2>読み終えたら</h2>
+        <h3>評価</h3>${choicesHTML('pprate', [1, 2, 3, 4, 5].map((n) => [String(n), '★'.repeat(n)]), p.rating ? String(p.rating) : null)}
+        <h3>当てはまるもの</h3>${multiHTML('pptag', PAPER_TAGS, p.tags)}
+        <label class="field"><span class="row" style="justify-content:space-between">読後のコメント（分かったこと、自分の臨床でどう使うか） ${voiceBtn('pp-com')}</span><textarea id="pp-com" style="min-height:110px">${esc(p.comment)}</textarea></label>
+        <div class="row">
+          <label class="field grow"><span>読み終えた日</span><input type="date" id="pp-read" value="${esc(p.readOn || '')}"></label>
+          <label class="field" style="width:110px"><span>読んだ時間</span><input type="number" inputmode="numeric" id="pp-min" value="${esc(p.minutes)}" placeholder="分"></label>
+        </div>
+        <p class="muted" style="margin:0">英語の文献で読んだ時間を入れると、英語の時間にも入ります。</p>
+      </div>
+      ${
+        existing
+          ? `<div class="card"><h2>参考文献からたどる <span>${children.length}件</span></h2>
+        ${children.map((c) => `<div class="list-item" data-child="${c.id}">↳ ${esc(c.title || '（題名なし）')} <span class="small">${esc(PAPER_STATUS.find((s) => s[0] === c.status)?.[1] || '')}</span></div>`).join('')}
+        <button type="button" class="btn sub wide" id="pp-addref" style="margin-top:8px">＋ この文献の参考文献から登録</button></div>`
+          : ''
+      }
+      <div class="row"><button class="btn grow" id="pp-save">保存</button>${existing ? '<button class="btn ghost" id="pp-del">削除</button>' : ''}</div>`);
+
+    const sync = () => {
+      p.title = $('#pp-title', sheet).value.trim();
+      p.authors = $('#pp-auth', sheet).value.trim();
+      p.journal = $('#pp-jour', sheet).value.trim();
+      p.year = $('#pp-year', sheet).value.trim();
+      p.kind = picked(sheet, 'ppkind') || p.kind;
+      p.lang = p.kind === '英語論文' ? 'en' : p.lang;
+      p.themes = readMulti(sheet, 'pptheme');
+      p.status = picked(sheet, 'ppst') || 'want';
+      p.rating = Number(picked(sheet, 'pprate')) || 0;
+      p.tags = readMulti(sheet, 'pptag');
+      p.comment = $('#pp-com', sheet).value;
+      p.readOn = $('#pp-read', sheet).value;
+      p.minutes = $('#pp-min', sheet).value;
+      if (p.status === 'done' && !p.readOn) p.readOn = today();
+    };
+    const store = () => {
+      const i = S.papers.findIndex((x) => x.id === p.id);
+      if (i >= 0) S.papers[i] = p;
+      else S.papers.push(p);
+      // 英語の文献を読んだ時間は、英語の記録にも入れる（1件につき1つ）
+      if (p.lang === 'en' && p.status === 'done' && Number(p.minutes) > 0) {
+        const log = S.engLogs.find((x) => x.paperId === p.id);
+        const rec = { date: p.readOn, minutes: Number(p.minutes), kind: 'paper', kindLabel: '英語の論文', skills: ['読む'], memo: p.title.slice(0, 40), paperId: p.id };
+        if (log) Object.assign(log, rec);
+        else S.engLogs.push({ id: uid(), created: Date.now(), ...rec });
+        save('engLogs');
+      }
+      save('papers');
+    };
+    const redraw = () => {
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    };
+    ['ppkind', 'ppst', 'pprate'].forEach((n) => bindChoices(sheet, n, () => {}));
+    bindPhotoBlock(sheet, p.id, p.photos || [], (list) => {
+      sync();
+      p.photos = list;
+      const stored = S.papers.find((x) => x.id === p.id);
+      if (stored) {
+        stored.photos = list;
+        save('papers');
+      }
+      redraw();
+    });
+    $('#pp-copy', sheet).onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(PAPER_PROMPT);
+        toast('コピーしました。Claudeのアプリに写真と一緒に貼り付けてください', 3500);
+      } catch {
+        toast('自動でコピーできませんでした', 3500);
+      }
+    };
+    $('#pp-paste', sheet).onclick = async () => {
+      let text = '';
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        text = prompt('Claudeの返事を貼り付けてください') || '';
+      }
+      try {
+        const d = parsePaperReply(text);
+        sync();
+        p.title = d.title || p.title;
+        p.authors = d.authors || p.authors;
+        p.journal = d.journal || p.journal;
+        p.year = String(d.year || p.year || '');
+        if (PAPER_KINDS.includes(d.kind)) p.kind = d.kind;
+        if (d.lang === 'en' || d.lang === 'ja') p.lang = d.lang;
+        const th = (Array.isArray(d.themes) ? d.themes : []).filter((x) => PAPER_THEMES.includes(x));
+        if (th.length) p.themes = [...new Set([...p.themes, ...th])];
+        redraw();
+        toast('読み取った内容を入れました。確認してください', 3500);
+      } catch {
+        toast('まとめの部分が見つかりませんでした。返事の最後のコード欄をコピーしてください', 5000);
+      }
+    };
+    $$('[data-child]', sheet).forEach((el) => (el.onclick = () => openPaper(el.dataset.child)));
+    $('#pp-addref', sheet)?.addEventListener('click', () => {
+      sync();
+      store();
+      openPaper(null, p.id);
+    });
+    $('#pp-save', sheet).onclick = () => {
+      sync();
+      if (!p.title && !(p.photos || []).length) return toast('題名か写真を入れてください');
+      store();
+      closeSheet();
+      toast(existing ? '保存しました' : '登録しました');
+      render();
+    };
+    $('#pp-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この文献を消しますか？')) return;
+      S.papers = S.papers.filter((x) => x.id !== p.id);
+      S.papers.forEach((x) => x.parent === p.id && (x.parent = null));
+      S.engLogs = S.engLogs.filter((x) => x.paperId !== p.id);
+      (p.photos || []).forEach((ph) => photoDel(ph.id));
+      save('papers');
+      save('engLogs');
+      closeSheet();
+      render();
+    });
+  };
+  draw();
 }
 
 /* ========== 雑務（領収書・振込・書類など） ========== */
