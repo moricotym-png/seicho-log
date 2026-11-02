@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION = 25; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 26; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -78,6 +78,7 @@ const DEFAULTS = {
   ],
   cases: [],
   notes: [],
+  chores: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
@@ -364,6 +365,13 @@ function renderToday(v) {
           )
           .join('')}</div>`);
     }
+    const chDue = choreOpen().filter((c) => c.due && c.due <= today());
+    if (chDue.length) {
+      const worst = Math.max(...chDue.map((c) => daysBetween(c.due, today())));
+      notices.push(`<div class="card${worst > 0 ? ' notice' : ''}"><h2>期限の雑務 ${chDue.length}件</h2>
+        <p class="small">${esc(chDue.slice(0, 3).map((c) => c.title).join('、'))}${chDue.length > 3 ? ' など' : ''}${worst > 0 ? `（いちばん古いものは期限から${worst}日）` : ''}</p>
+        <button class="btn sub" data-gochores>雑務を見る</button></div>`);
+    }
     for (const k of caseFollowUps()) {
       notices.push(`<div class="card"><h2>経過を見る日：${esc(k.area)}${k.mark ? ` ${esc(k.mark)}` : ''}</h2>
         <p class="small">${jpDate(k.date)}の症例です。${esc(k.procedure || '')}</p>
@@ -469,6 +477,10 @@ function renderToday(v) {
     $('.tabs [data-tab="consult"]').click();
   });
   $$('[data-case]', v).forEach((b) => b.addEventListener('click', () => openCase(b.dataset.case)));
+  $('[data-gochores]', v)?.addEventListener('click', () => {
+    workTab = 'chores';
+    $('.tabs [data-tab="consult"]').click();
+  });
   $$('[data-consult]', v).forEach((b) => b.addEventListener('click', () => openConsult(b.dataset.consult)));
   $$('[data-later]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -2266,7 +2278,7 @@ function openTreatmentMenu() {
 /* ========== 仕事（相談・院内技工） ========== */
 let workTab = 'consult';
 function renderWork(v) {
-  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート']], workTab)}</div><div id="work-body"></div>`;
+  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['chores', '雑務']], workTab)}</div><div id="work-body"></div>`;
   bindChoices(v, 'work', (x) => {
     workTab = x || workTab;
     render();
@@ -2274,6 +2286,7 @@ function renderWork(v) {
   const body = $('#work-body', v);
   if (workTab === 'lab') renderLab(body);
   else if (workTab === 'clinic') renderClinic(body);
+  else if (workTab === 'chores') renderChores(body);
   else renderConsult(body);
 }
 
@@ -3710,6 +3723,134 @@ function openWord(id) {
     closeSheet();
     render();
   });
+}
+
+/* ========== 雑務（領収書・振込・書類など） ========== */
+// 期限と「何日過ぎたか」を見えるようにして、ためないようにする。毎月・毎週くり返すものは、終えると次の回を自動で作る。
+const CHORE_CATS = ['領収書', '振込', '書類', '連絡', '買い物', 'その他'];
+const choreOpen = () => S.chores.filter((c) => !c.done);
+function nextDue(c) {
+  const base = parseYmd(c.due || today());
+  if (c.repeat?.type === 'weekly') {
+    base.setDate(base.getDate() + 7);
+    return ymd(base);
+  }
+  if (c.repeat?.type === 'monthly') {
+    const d = new Date(base.getFullYear(), base.getMonth() + 1, 1);
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    d.setDate(Math.min(c.repeat.day, last));
+    return ymd(d);
+  }
+  return null;
+}
+const repeatText = (r) => (r?.type === 'monthly' ? `毎月${r.day}日` : r?.type === 'weekly' ? `毎週${WD[r.wd]}曜` : '');
+
+function completeChore(c) {
+  const t = today();
+  c.done = t;
+  if (c.repeat) S.chores.push({ id: uid(), created: Date.now(), title: c.title, cat: c.cat, due: nextDue(c), repeat: c.repeat, note: c.note, done: null });
+  save('chores');
+  const late = c.due ? daysBetween(c.due, t) : 0;
+  toast(late > 0 ? `終わりました（期限から${late}日）。次は早めにいきましょう` : '終わりました！期限内です');
+  render();
+}
+
+function renderChores(v) {
+  const t = today();
+  const open = choreOpen().sort((a, b) => ((a.due || '9999') < (b.due || '9999') ? -1 : 1));
+  const over = open.filter((c) => c.due && c.due < t);
+  const now = open.filter((c) => c.due === t);
+  const soon = open.filter((c) => c.due && c.due > t);
+  const noDue = open.filter((c) => !c.due);
+  const done = S.chores.filter((c) => c.done).sort((a, b) => (a.done < b.done ? 1 : -1));
+  const monthDone = done.filter((c) => monthKey(c.done) === monthKey(t));
+  const onTime = monthDone.filter((c) => !c.due || c.done <= c.due).length;
+  const row = (c) => {
+    const late = c.due && c.due < t ? daysBetween(c.due, t) : 0;
+    const dueTxt = !c.due ? '' : late ? `<b style="color:var(--warn)">期限から${late}日</b>` : c.due === t ? '<b>今日まで</b>' : `${jpDate(c.due)}まで（あと${daysBetween(t, c.due)}日）`;
+    return `<div class="check" style="align-items:flex-start"><input type="checkbox" data-chdone="${c.id}">
+      <div class="grow" data-ch="${c.id}"><div>${esc(c.title)}</div><div class="meta">${esc(c.cat)}${dueTxt ? ` ・ ${dueTxt}` : ''}${c.repeat ? ` ・ 🔁${repeatText(c.repeat)}` : ''}</div></div></div>`;
+  };
+  const block = (title, list) => (list.length ? `<h3>${title}</h3>${list.map(row).join('')}` : '');
+  v.innerHTML = `
+    <div class="card">
+      <h2>雑務 <span>${open.length}件</span></h2>
+      <div class="row"><input type="text" id="ch-quick" class="grow" placeholder="例：A社に振込、領収書を整理"><button class="btn sm" id="ch-add">追加</button></div>
+      <p class="muted" style="margin:6px 0 0">期限やくり返しを決めるときは、追加したあとに押して開きます。</p>
+    </div>
+    <div class="card">
+      ${open.length ? block(`期限を過ぎた ${over.length}件`, over) + block('今日まで', now) + block('これから', soon) + block('期限なし', noDue) : '<p class="muted">ためている雑務はありません。すっきりですね！</p>'}
+    </div>
+    <div class="card">
+      <h2>今月終えた <span>${monthDone.length}件</span></h2>
+      <p class="small" style="margin:0 0 6px">期限内 ${onTime}件 ・ 遅れ ${monthDone.length - onTime}件</p>
+      ${done.slice(0, 10).map((c) => `<div class="list-item" data-ch="${c.id}"><div class="row" style="justify-content:space-between"><span>${esc(c.title)}</span><span class="small">${jpDate(c.done)}</span></div>
+        <div class="meta">${c.due && c.done > c.due ? `期限から${daysBetween(c.due, c.done)}日遅れ` : '期限内'}</div></div>`).join('')}
+    </div>`;
+  const add = () => {
+    const title = $('#ch-quick', v).value.trim();
+    if (!title) return;
+    const cat = CHORE_CATS.find((k) => title.includes(k)) || (/振込|振り込/.test(title) ? '振込' : /領収/.test(title) ? '領収書' : 'その他');
+    S.chores.push({ id: uid(), created: Date.now(), title, cat, due: '', repeat: null, note: '', done: null });
+    save('chores');
+    render();
+  };
+  $('#ch-add', v).onclick = add;
+  $('#ch-quick', v).onkeydown = (e) => e.key === 'Enter' && add();
+  $$('[data-chdone]', v).forEach((b) => (b.onchange = () => completeChore(S.chores.find((c) => c.id === b.dataset.chdone))));
+  $$('[data-ch]', v).forEach((el) => (el.onclick = () => openChore(el.dataset.ch)));
+}
+
+function openChore(id) {
+  const existing = S.chores.find((c) => c.id === id);
+  const c = { ...existing };
+  const rt = c.repeat?.type || 'none';
+  const sheet = openSheet('雑務', `
+    <label class="field"><span>やること</span><input type="text" id="cd-title" value="${esc(c.title)}"></label>
+    <h3>分類</h3>${choicesHTML('chcat', CHORE_CATS.map((x) => [x, x]), c.cat)}
+    <label class="field"><span>期限</span><input type="date" id="cd-due" value="${esc(c.due || '')}"></label>
+    <div class="row">${[['今日', 0], ['明日', 1], ['3日後', 3], ['1週間後', 7]].map(([l, n]) => `<button type="button" class="btn ghost sm" data-in="${n}">${l}</button>`).join('')}</div>
+    <h3>くり返し</h3>${choicesHTML('chrep', [['none', 'なし'], ['weekly', '毎週'], ['monthly', '毎月']], rt)}
+    <p class="muted" style="margin:4px 0 0">毎週は期限の曜日、毎月は期限の日付でくり返します。終えると次の回が自動でできます。</p>
+    <label class="field"><span class="row" style="justify-content:space-between">メモ（振込先、金額、必要な書類など） ${voiceBtn('cd-note')}</span><textarea id="cd-note">${esc(c.note || '')}</textarea></label>
+    <div class="row"><button class="btn grow" id="cd-save">保存</button>${c.done ? '<button class="btn sub" id="cd-undo">未完了に戻す</button>' : '<button class="btn sub" id="cd-done">終えた</button>'}<button class="btn ghost" id="cd-del">削除</button></div>`);
+  bindChoices(sheet, 'chcat', () => {});
+  bindChoices(sheet, 'chrep', () => {});
+  $$('[data-in]', sheet).forEach((b) => (b.onclick = () => ($('#cd-due', sheet).value = addDays(today(), Number(b.dataset.in)))));
+  const sync = () => {
+    c.title = $('#cd-title', sheet).value.trim() || c.title;
+    c.cat = picked(sheet, 'chcat') || 'その他';
+    c.due = $('#cd-due', sheet).value;
+    c.note = $('#cd-note', sheet).value;
+    const r = picked(sheet, 'chrep') || 'none';
+    if (r !== 'none' && !c.due) c.due = today();
+    c.repeat = r === 'weekly' ? { type: 'weekly', wd: parseYmd(c.due).getDay() } : r === 'monthly' ? { type: 'monthly', day: parseYmd(c.due).getDate() } : null;
+    Object.assign(existing, c);
+    save('chores');
+  };
+  $('#cd-save', sheet).onclick = () => {
+    sync();
+    closeSheet();
+    render();
+  };
+  $('#cd-done', sheet)?.addEventListener('click', () => {
+    sync();
+    closeSheet();
+    completeChore(existing);
+  });
+  $('#cd-undo', sheet)?.addEventListener('click', () => {
+    existing.done = null;
+    save('chores');
+    closeSheet();
+    render();
+  });
+  $('#cd-del', sheet).onclick = () => {
+    if (!confirm('この雑務を消しますか？')) return;
+    S.chores = S.chores.filter((x) => x.id !== id);
+    save('chores');
+    closeSheet();
+    render();
+  };
 }
 
 /* ========== ホーム画面に追加 ========== */
