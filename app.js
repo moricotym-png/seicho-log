@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 30; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 31; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -371,6 +371,11 @@ function renderToday(v) {
         <p class="small">${jpDate(pa.readOn)}に読んだ「${esc(pa.title.slice(0, 40))}」に「臨床にすぐ活かせる」を付けていました。</p>
         <div class="row"><button class="btn" data-tried="${pa.id}">試した</button><button class="btn ghost" data-trylater="${pa.id}">まだ（1週間後にまた聞く）</button></div></div>`);
     }
+    for (const c of choreOpen().filter((x) => choreActive(x) && x.due !== today())) {
+      notices.push(`<div class="card"><h2>${esc(c.title)}の期間です</h2>
+        <p class="small">${jpDate(c.due)}までに終えましょう（あと${daysBetween(today(), c.due)}日）。</p>
+        <div class="row"><button class="btn" data-chnow="${c.id}">終えた</button><button class="btn ghost" data-gochores>雑務を見る</button></div></div>`);
+    }
     const chDue = choreOpen().filter((c) => c.due && c.due <= today());
     if (chDue.length) {
       const worst = Math.max(...chDue.map((c) => daysBetween(c.due, today())));
@@ -502,10 +507,13 @@ function renderToday(v) {
       render();
     })
   );
-  $('[data-gochores]', v)?.addEventListener('click', () => {
-    workTab = 'chores';
-    $('.tabs [data-tab="consult"]').click();
-  });
+  $$('[data-chnow]', v).forEach((b) => b.addEventListener('click', () => completeChore(S.chores.find((c) => c.id === b.dataset.chnow))));
+  $$('[data-gochores]', v).forEach((b) =>
+    b.addEventListener('click', () => {
+      workTab = 'chores';
+      $('.tabs [data-tab="consult"]').click();
+    })
+  );
   $$('[data-consult]', v).forEach((b) => b.addEventListener('click', () => openConsult(b.dataset.consult)));
   $$('[data-later]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -4004,12 +4012,18 @@ function nextDue(c) {
   }
   return null;
 }
-const repeatText = (r) => (r?.type === 'monthly' ? `毎月${r.day}日` : r?.type === 'weekly' ? `毎週${WD[r.wd]}曜` : '');
+const repeatText = (r) => (r?.type === 'monthly' ? `毎月${r.startOffset ? `${r.day - r.startOffset}〜` : ''}${r.day}日` : r?.type === 'weekly' ? `毎週${WD[r.wd]}曜` : '');
+// 開始日がある雑務は、その日から「取りかかる期間」になる
+const choreActive = (c) => !c.done && c.start && c.start <= today() && (!c.due || c.due >= today());
 
 function completeChore(c) {
   const t = today();
   c.done = t;
-  if (c.repeat) S.chores.push({ id: uid(), created: Date.now(), title: c.title, cat: c.cat, due: nextDue(c), repeat: c.repeat, note: c.note, done: null });
+  if (c.repeat) {
+    const due = nextDue(c);
+    const start = c.repeat.startOffset ? addDays(due, -c.repeat.startOffset) : '';
+    S.chores.push({ id: uid(), created: Date.now(), title: c.title, cat: c.cat, start, due, repeat: c.repeat, note: c.note, done: null });
+  }
   save('chores');
   const late = c.due ? daysBetween(c.due, t) : 0;
   toast(late > 0 ? `終わりました（期限から${late}日）。次は早めにいきましょう` : '終わりました！期限内です');
@@ -4020,19 +4034,30 @@ function renderChores(v) {
   const t = today();
   const open = choreOpen().sort((a, b) => ((a.due || '9999') < (b.due || '9999') ? -1 : 1));
   const over = open.filter((c) => c.due && c.due < t);
-  const now = open.filter((c) => c.due === t);
-  const soon = open.filter((c) => c.due && c.due > t);
+  const now = open.filter((c) => c.due === t || (c.due > t && choreActive(c)));
+  const soon = open.filter((c) => c.due && c.due > t && !choreActive(c));
   const noDue = open.filter((c) => !c.due);
   const done = S.chores.filter((c) => c.done).sort((a, b) => (a.done < b.done ? 1 : -1));
   const monthDone = done.filter((c) => monthKey(c.done) === monthKey(t));
   const onTime = monthDone.filter((c) => !c.due || c.done <= c.due).length;
   const row = (c) => {
     const late = c.due && c.due < t ? daysBetween(c.due, t) : 0;
-    const dueTxt = !c.due ? '' : late ? `<b style="color:var(--warn)">期限から${late}日</b>` : c.due === t ? '<b>今日まで</b>' : `${jpDate(c.due)}まで（あと${daysBetween(t, c.due)}日）`;
+    const dueTxt = !c.due
+      ? ''
+      : late
+        ? `<b style="color:var(--warn)">期限から${late}日</b>`
+        : c.due === t
+          ? '<b>今日まで</b>'
+          : c.start && c.start > t
+            ? c.start === c.due
+              ? `${jpDate(c.due)}`
+              : `${jpDate(c.start)}から${jpDate(c.due)}まで`
+            : `${jpDate(c.due)}まで（あと${daysBetween(t, c.due)}日）`;
     return `<div class="check" style="align-items:flex-start"><input type="checkbox" data-chdone="${c.id}">
       <div class="grow" data-ch="${c.id}"><div>${esc(c.title)}</div><div class="meta">${esc(c.cat)}${dueTxt ? ` ・ ${dueTxt}` : ''}${c.repeat ? ` ・ 🔁${repeatText(c.repeat)}` : ''}</div></div></div>`;
   };
   const block = (title, list) => (list.length ? `<h3>${title}</h3>${list.map(row).join('')}` : '');
+  // 「今日まで」の見出しは、期間中のものも含めて「今やること」にする
   v.innerHTML = `
     <div class="card">
       <h2>雑務 <span>${open.length}件</span></h2>
@@ -4040,7 +4065,7 @@ function renderChores(v) {
       <p class="muted" style="margin:6px 0 0">期限やくり返しを決めるときは、追加したあとに押して開きます。</p>
     </div>
     <div class="card">
-      ${open.length ? block(`期限を過ぎた ${over.length}件`, over) + block('今日まで', now) + block('これから', soon) + block('期限なし', noDue) : '<p class="muted">ためている雑務はありません。すっきりですね！</p>'}
+      ${open.length ? block(`期限を過ぎた ${over.length}件`, over) + block('今やること', now) + block('これから', soon) + block('期限なし', noDue) : '<p class="muted">ためている雑務はありません。すっきりですね！</p>'}
     </div>
     <div class="card">
       <h2>今月終えた <span>${monthDone.length}件</span></h2>
@@ -4069,7 +4094,10 @@ function openChore(id) {
   const sheet = openSheet('雑務', `
     <label class="field"><span>やること</span><input type="text" id="cd-title" value="${esc(c.title)}"></label>
     <h3>分類</h3>${choicesHTML('chcat', CHORE_CATS.map((x) => [x, x]), c.cat)}
-    <label class="field"><span>期限</span><input type="date" id="cd-due" value="${esc(c.due || '')}"></label>
+    <div class="row">
+      <label class="field grow"><span>取りかかる日（任意）</span><input type="date" id="cd-start" value="${esc(c.start || '')}"></label>
+      <label class="field grow"><span>期限</span><input type="date" id="cd-due" value="${esc(c.due || '')}"></label>
+    </div>
     <div class="row">${[['今日', 0], ['明日', 1], ['3日後', 3], ['1週間後', 7]].map(([l, n]) => `<button type="button" class="btn ghost sm" data-in="${n}">${l}</button>`).join('')}</div>
     <h3>くり返し</h3>${choicesHTML('chrep', [['none', 'なし'], ['weekly', '毎週'], ['monthly', '毎月']], rt)}
     <p class="muted" style="margin:4px 0 0">毎週は期限の曜日、毎月は期限の日付でくり返します。終えると次の回が自動でできます。</p>
@@ -4082,10 +4110,13 @@ function openChore(id) {
     c.title = $('#cd-title', sheet).value.trim() || c.title;
     c.cat = picked(sheet, 'chcat') || 'その他';
     c.due = $('#cd-due', sheet).value;
+    c.start = $('#cd-start', sheet).value;
+    if (c.start && c.due && c.start > c.due) c.start = c.due;
     c.note = $('#cd-note', sheet).value;
     const r = picked(sheet, 'chrep') || 'none';
     if (r !== 'none' && !c.due) c.due = today();
     c.repeat = r === 'weekly' ? { type: 'weekly', wd: parseYmd(c.due).getDay() } : r === 'monthly' ? { type: 'monthly', day: parseYmd(c.due).getDate() } : null;
+    if (c.repeat && c.start) c.repeat.startOffset = daysBetween(c.start, c.due);
     Object.assign(existing, c);
     save('chores');
   };
@@ -4177,6 +4208,24 @@ window.addEventListener('unhandledrejection', (e) => showError('処理', e.reaso
     S[k] = val === undefined ? structuredClone(DEFAULTS[k]) : val;
   }
   if (!S.settings.clinicDays) S.settings.clinicDays = [...DEFAULTS.settings.clinicDays];
+  if (!S.settings.receiptSeeded) {
+    const t = today();
+    let y = Number(t.slice(0, 4));
+    let m = Number(t.slice(5, 7));
+    if (Number(t.slice(8, 10)) > 10) m += 1;
+    if (m > 12) {
+      m = 1;
+      y += 1;
+    }
+    const d = (n) => `${y}-${String(m).padStart(2, '0')}-${String(n).padStart(2, '0')}`;
+    S.chores.push(
+      { id: uid(), created: Date.now(), title: 'レセプトのチェック', cat: '書類', start: d(5), due: d(9), repeat: { type: 'monthly', day: 9, startOffset: 4 }, note: '10日の提出までに見直す', done: null },
+      { id: uid(), created: Date.now() + 1, title: 'レセプトの提出', cat: '書類', start: d(10), due: d(10), repeat: { type: 'monthly', day: 10, startOffset: 0 }, note: '', done: null }
+    );
+    S.settings.receiptSeeded = true;
+    save('chores');
+    save('settings');
+  }
   // 文献のタグ「読む価値なし」は「あまり参考にならなかった」に名前を変えた
   S.papers.forEach((x) => (x.tags = (x.tags || []).map((t) => (t === '読む価値なし' ? 'あまり参考にならなかった' : t))));
   // カルテのチェックは、この機能を使い始めた日から数える
