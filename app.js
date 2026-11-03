@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 32; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 33; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -435,6 +435,7 @@ function renderToday(v) {
     </div>
 
     ${chartCardHTML(date)}
+    ${routineCardHTML(date)}
 
     <div class="card">
       <h2>☾ 夜のふりかえり</h2>
@@ -456,6 +457,17 @@ function renderToday(v) {
   $('#night').onchange = (e) => ((d.night = e.target.value), persist());
   bindChoices(v, 'work', (x) => ((d.work = x), persist()));
   bindChoices(v, 'dawdle', (x) => ((d.dawdle = x), persist()));
+  $('#stock', v)?.addEventListener('change', (e) => {
+    d.stock = e.target.checked;
+    persist();
+    render();
+  });
+  $('#blog', v)?.addEventListener('change', (e) => {
+    d.blog = e.target.checked;
+    persist();
+    if (d.blog) toast('投稿おつかれさまです！今週の分は達成です', 3000);
+    render();
+  });
   $('#diary').onchange = (e) => {
     d.diary = e.target.checked;
     persist();
@@ -601,6 +613,38 @@ function chartWeekStatHTML(days) {
 }
 
 // 今日まだ書いていなくても、昨日までつながっていれば続いている日数として数える
+/* ---------- 毎日・毎週のチェック（株価レポート・ブログ） ---------- */
+// 株価レポートは毎朝 Gmail に届くので、読んだ日にチェック。ブログは週1回の投稿が目標。
+function dayStreak(key) {
+  let d = today();
+  if (!S.days[d]?.[key]) d = addDays(d, -1);
+  let n = 0;
+  while (S.days[d]?.[key]) {
+    n++;
+    d = addDays(d, -1);
+  }
+  return n;
+}
+function blogWeek(date) {
+  const ws = weekStart(date);
+  return [...Array(7)].map((_, i) => addDays(ws, i)).filter((x) => S.days[x]?.blog);
+}
+function routineCardHTML(date) {
+  const d = S.days[date] || {};
+  const posted = blogWeek(date);
+  const left = daysBetween(date, addDays(weekStart(date), 6));
+  const streak = dayStreak('stock');
+  return `<div class="card">
+    <h2>✅ 毎日・毎週のチェック</h2>
+    <label class="check"><input type="checkbox" id="stock" ${d.stock ? 'checked' : ''}> 📈 株価レポートを読んだ</label>
+    <p class="muted" style="margin:0 0 6px 32px">${streak ? `${streak}日続いています` : '毎朝 Gmail に届くレポートを読んだらチェック'}</p>
+    <label class="check"><input type="checkbox" id="blog" ${d.blog ? 'checked' : ''}> 📝 ブログを投稿した</label>
+    <p class="muted" style="margin:0 0 0 32px">${
+      posted.length ? `今週は投稿済み ✓（${posted.map(jpDate).join('、')}）` : `今週まだです。日曜まであと${left}日`
+    }</p>
+  </div>`;
+}
+
 function diaryStreak() {
   let d = today();
   if (!S.days[d]?.diary) d = addDays(d, -1);
@@ -1626,6 +1670,8 @@ function renderReview(v) {
         <div class="stat"><div class="v">${urges}回</div><div class="l">YouTubeをがまん</div></div>
         <div class="stat"><div class="v">${days.filter((d) => S.days[d]?.diary).length}日</div><div class="l">日記を書いた</div></div>
         ${chartWeekStatHTML(days)}
+        <div class="stat"><div class="v">${days.filter((x) => S.days[x]?.stock).length}/7日</div><div class="l">株価レポートを読んだ</div></div>
+        <div class="stat"><div class="v">${days.some((x) => S.days[x]?.blog) ? '✓' : '—'}</div><div class="l">ブログの投稿（週1回）</div></div>
       </div>
     </div>
     ${afterDrinkHTML()}`;
