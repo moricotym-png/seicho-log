@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 31; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 32; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -993,20 +993,23 @@ function openWorkout(id, tplKey, date) {
       w.note = $('#w-note', sheet).value;
       $$('[data-kg]', sheet).forEach((i) => {
         const [ei, si] = i.dataset.kg.split('-').map(Number);
+        if (!w.exercises[ei]?.sets[si]) return;
         w.exercises[ei].sets[si].kg = i.value === '' ? '' : Number(i.value);
       });
       $$('[data-reps]', sheet).forEach((i) => {
         const [ei, si] = i.dataset.reps.split('-').map(Number);
+        if (!w.exercises[ei]?.sets[si]) return;
         w.exercises[ei].sets[si].reps = i.value === '' ? '' : Number(i.value);
       });
       $$('[data-rpe]', sheet).forEach((i) => {
         const [ei, si] = i.dataset.rpe.split('-').map(Number);
+        if (!w.exercises[ei]?.sets[si]) return;
         w.exercises[ei].sets[si].rpe = i.value === '' ? '' : Number(i.value);
       });
     };
     const scroll = sheet.scrollTop;
+    // 画面の読み取りは、呼ぶ側が変更の前に済ませておく（消したあとに古い画面を読むと番号がずれる）
     const redraw = () => {
-      sync();
       const top = $('.sheet').scrollTop;
       draw();
       $('.sheet').scrollTop = top;
@@ -2187,8 +2190,8 @@ async function openConsult(id) {
       c.score = picked(sheet, 'score');
       c.note = $('#c-note', sheet).value;
     };
+    // 画面の読み取りは、呼ぶ側が変更の前に済ませておく（消したあとに古い画面を読むと番号がずれる）
     const redraw = () => {
-      sync();
       const top = $('.sheet').scrollTop;
       draw();
       $('.sheet').scrollTop = top;
@@ -2219,6 +2222,7 @@ async function openConsult(id) {
         })
     );
     bindPinRow(sheet, async () => {
+      sync();
       if (existing?.enc) {
         try {
           amounts = { ...(await decJSON(existing.enc)), ...Object.fromEntries(Object.entries(amounts).filter(([, y]) => y !== '')) };
