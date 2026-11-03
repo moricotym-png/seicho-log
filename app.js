@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION = 33; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 34; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -80,6 +80,7 @@ const DEFAULTS = {
   notes: [],
   chores: [],
   papers: [],
+  blog: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
@@ -462,6 +463,10 @@ function renderToday(v) {
     persist();
     render();
   });
+  $('[data-goblog]', v)?.addEventListener('click', () => {
+    workTab = 'blog';
+    $('.tabs [data-tab="consult"]').click();
+  });
   $('#blog', v)?.addEventListener('change', (e) => {
     d.blog = e.target.checked;
     persist();
@@ -640,8 +645,11 @@ function routineCardHTML(date) {
     <p class="muted" style="margin:0 0 6px 32px">${streak ? `${streak}日続いています` : '毎朝 Gmail に届くレポートを読んだらチェック'}</p>
     <label class="check"><input type="checkbox" id="blog" ${d.blog ? 'checked' : ''}> 📝 ブログを投稿した</label>
     <p class="muted" style="margin:0 0 0 32px">${
-      posted.length ? `今週は投稿済み ✓（${posted.map(jpDate).join('、')}）` : `今週まだです。日曜まであと${left}日`
+      posted.length
+        ? `今週は投稿済み ✓（${posted.map(jpDate).join('、')}）`
+        : `今週まだです。日曜まであと${left}日${S.blog.some((b) => b.stage !== 'posted') ? `（ネタ帳に${S.blog.filter((b) => b.stage !== 'posted').length}件）` : ''}`
     }</p>
+    <button class="btn ghost sm" data-goblog style="margin:6px 0 0 32px">ブログのネタ帳を開く</button>
   </div>`;
 }
 
@@ -2361,7 +2369,7 @@ function openTreatmentMenu() {
 /* ========== 仕事（相談・院内技工） ========== */
 let workTab = 'consult';
 function renderWork(v) {
-  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['papers', '文献'], ['chores', '雑務']], workTab)}</div><div id="work-body"></div>`;
+  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['papers', '文献'], ['blog', 'ブログ'], ['chores', '雑務']], workTab)}</div><div id="work-body"></div>`;
   bindChoices(v, 'work', (x) => {
     workTab = x || workTab;
     render();
@@ -2371,6 +2379,7 @@ function renderWork(v) {
   else if (workTab === 'clinic') renderClinic(body);
   else if (workTab === 'chores') renderChores(body);
   else if (workTab === 'papers') renderPapers(body);
+  else if (workTab === 'blog') renderBlog(body);
   else renderConsult(body);
 }
 
@@ -4042,6 +4051,105 @@ function openPaper(id, parentId = null) {
     });
   };
   draw();
+}
+
+/* ========== ブログ（ネタ帳から投稿まで） ========== */
+// ネタを貯めておき、下書き → チェック → 投稿 と進める。投稿した日は「今日」のブログのチェックにも入る。
+const BLOG_STAGES = [['idea', 'ネタ'], ['draft', '下書きあり'], ['checked', 'チェック済み'], ['posted', '投稿済み']];
+const BLOG_CATS = ['症例紹介', '治療の説明', '予防・セルフケア', '矯正', 'インプラント', '審美', '院内のこと', 'その他'];
+const stageLabel = (k) => BLOG_STAGES.find((s) => s[0] === k)?.[1] || '';
+
+function markBlogDay(date, on) {
+  const d = day(date);
+  if (on) d.blog = true;
+  else if (!S.blog.some((b) => b.stage === 'posted' && b.postedOn === date)) delete d.blog;
+  save('days');
+}
+
+function renderBlog(v) {
+  const t = today();
+  const posted = blogWeek(t);
+  const left = daysBetween(t, addDays(weekStart(t), 6));
+  const by = (st) => S.blog.filter((b) => b.stage === st).sort((a, b) => (st === 'posted' ? (a.postedOn < b.postedOn ? 1 : -1) : a.created - b.created));
+  const ready = [...by('checked'), ...by('draft')];
+  const monthPosted = S.blog.filter((b) => b.stage === 'posted' && monthKey(b.postedOn || '') === monthKey(t)).length;
+  const row = (b) => `<div class="list-item" data-blog="${b.id}"><div class="row" style="justify-content:space-between"><b class="grow">${esc(b.title)}</b><span class="small">${esc(stageLabel(b.stage))}</span></div>
+    <div class="meta">${esc(b.cat || '')}${b.postedOn ? ` ・ ${jpDate(b.postedOn)}に投稿` : ''}${b.memo ? ` ・ ${esc(b.memo.slice(0, 30))}` : ''}</div></div>`;
+  v.innerHTML = `
+    <div class="card${posted.length ? ' good' : ''}">
+      <h2>今週のブログ <span>${posted.length ? '投稿済み ✓' : `まだ（あと${left}日）`}</span></h2>
+      <p class="small" style="margin:0 0 8px">今月の投稿 ${monthPosted}件 ・ ネタ ${by('idea').length}件 ・ 下書き ${ready.length}件</p>
+      <div class="row"><input type="text" id="bl-quick" class="grow" placeholder="ネタをひとこと（例：歯ぎしりとマウスピース）"><button class="btn sm" id="bl-add">追加</button></div>
+      <div class="row" style="margin-top:6px">${voiceBtn('bl-quick')}<span class="muted">思いついたら、すぐ話して追加</span></div>
+    </div>
+    ${ready.length ? `<div class="card"><h2>投稿に近いもの</h2>${ready.map(row).join('')}</div>` : ''}
+    <div class="card"><h2>ネタ帳 <span>${by('idea').length}件</span></h2>${by('idea').map(row).join('') || '<p class="muted">まだありません。</p>'}</div>
+    <div class="card"><h2>投稿したもの</h2>${by('posted').slice(0, 15).map(row).join('') || '<p class="muted">まだありません。</p>'}</div>`;
+  const add = () => {
+    const title = $('#bl-quick', v).value.trim();
+    if (!title) return;
+    S.blog.push({ id: uid(), created: Date.now(), title, cat: '', stage: 'idea', memo: '', url: '', postedOn: '' });
+    save('blog');
+    toast('ネタ帳に入れました');
+    render();
+  };
+  $('#bl-add', v).onclick = add;
+  $('#bl-quick', v).onkeydown = (e) => e.key === 'Enter' && add();
+  $$('[data-blog]', v).forEach((el) => (el.onclick = () => openBlog(el.dataset.blog)));
+}
+
+function openBlog(id) {
+  const b = S.blog.find((x) => x.id === id);
+  const sheet = openSheet('ブログ', `
+    <label class="field"><span>題名・ネタ</span><input type="text" id="bl-title" value="${esc(b.title)}"></label>
+    <h3>分類</h3>${choicesHTML('blcat', BLOG_CATS.map((x) => [x, x]), b.cat)}
+    <h3>進み具合</h3>${choicesHTML('blst', BLOG_STAGES, b.stage)}
+    <label class="field"><span class="row" style="justify-content:space-between">メモ（伝えたいこと、使う写真、患者さんのよくある質問など） ${voiceBtn('bl-memo')}</span><textarea id="bl-memo" style="min-height:110px">${esc(b.memo)}</textarea></label>
+    <label class="field"><span>下書き・投稿のURL（任意）</span><input type="url" id="bl-url" value="${esc(b.url)}" placeholder="https://"></label>
+    ${b.url ? `<p class="small"><a href="${esc(b.url)}" target="_blank" rel="noopener">開く</a></p>` : ''}
+    <label class="field"><span>投稿した日</span><input type="date" id="bl-date" value="${esc(b.postedOn || '')}"></label>
+    <p class="muted">患者さんの名前や、本人と分かる写真は入れないようにしましょう。</p>
+    <div class="row"><button class="btn grow" id="bl-save">保存</button>${b.stage === 'posted' ? '' : '<button class="btn sub" id="bl-post">投稿した！</button>'}<button class="btn ghost" id="bl-del">削除</button></div>`);
+  bindChoices(sheet, 'blcat', () => {});
+  bindChoices(sheet, 'blst', () => {});
+  const before = { stage: b.stage, postedOn: b.postedOn };
+  const sync = () => {
+    b.title = $('#bl-title', sheet).value.trim() || b.title;
+    b.cat = picked(sheet, 'blcat') || '';
+    b.stage = picked(sheet, 'blst') || 'idea';
+    b.memo = $('#bl-memo', sheet).value;
+    b.url = $('#bl-url', sheet).value.trim();
+    b.postedOn = $('#bl-date', sheet).value;
+    if (b.stage === 'posted' && !b.postedOn) b.postedOn = today();
+    if (b.stage !== 'posted') b.postedOn = '';
+  };
+  const finish = (msg) => {
+    save('blog');
+    // 投稿日が変わったら「今日」のブログのチェックも合わせる
+    if (before.stage === 'posted' && before.postedOn && before.postedOn !== b.postedOn) markBlogDay(before.postedOn, false);
+    if (b.stage === 'posted') markBlogDay(b.postedOn, true);
+    closeSheet();
+    if (msg) toast(msg, 3000);
+    render();
+  };
+  $('#bl-save', sheet).onclick = () => {
+    sync();
+    finish(b.stage === 'posted' && before.stage !== 'posted' ? '投稿おつかれさまです！今週の分は達成です' : '');
+  };
+  $('#bl-post', sheet)?.addEventListener('click', () => {
+    sync();
+    b.stage = 'posted';
+    b.postedOn = b.postedOn || today();
+    finish('投稿おつかれさまです！今週の分は達成です');
+  });
+  $('#bl-del', sheet).onclick = () => {
+    if (!confirm('このネタを消しますか？')) return;
+    S.blog = S.blog.filter((x) => x.id !== b.id);
+    if (before.stage === 'posted' && before.postedOn) markBlogDay(before.postedOn, false);
+    save('blog');
+    closeSheet();
+    render();
+  };
 }
 
 /* ========== 雑務（領収書・振込・書類など） ========== */
