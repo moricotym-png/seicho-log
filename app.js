@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 34; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 35; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -99,6 +99,7 @@ const TEMPLATES = {
   cpush: { name: 'クリニック Push', place: 'clinic', ppl: 'push', exercises: ['ショルダープレス', 'サイドレイズ', '腕立て伏せ', 'フレンチプレス'] },
   cpull: { name: 'クリニック Pull', place: 'clinic', ppl: 'pull', exercises: ['斜め懸垂', 'ダンベルロウ', 'リアレイズ', 'ダンベルカール'] },
   clegs: { name: 'クリニック Legs', place: 'clinic', ppl: 'legs', exercises: ['ブルガリアンスクワット', 'ルーマニアンデッドリフト', 'カーフレイズ', 'アブローラー'] },
+  crest: { name: 'クリニック 休養日（軽め）', place: 'clinic', rest: true, exercises: ['アブローラー', 'レッグレイズ', 'サイドレイズ'] },
 };
 const PPL = [['push', 'Push', '胸・肩・三頭'], ['pull', 'Pull', '背中・二頭'], ['legs', 'Legs', '脚・お尻']];
 // 種目 → Push / Pull / Legs（腹筋などはどれにも入れない）
@@ -864,7 +865,9 @@ function weekWorkouts(ws) {
 function renderGym(v) {
   const t = today();
   const ws = weekStart(t);
-  const n = weekWorkouts(ws).length;
+  const isRest = (w) => !!TEMPLATES[w.tpl]?.rest;
+  const nRest = weekWorkouts(ws).filter(isRest).length;
+  const n = weekWorkouts(ws).length - nRest;
   const nGym = weekWorkouts(ws).filter((w) => placeOf(w) === 'gym').length;
   const nClinic = n - nGym;
   const pick = clinicPick(ws);
@@ -891,7 +894,7 @@ function renderGym(v) {
     </div>
     <div class="card">
       <h2>今週の筋トレ <span>${n}回</span></h2>
-      <p class="small" style="margin:0 0 4px">🏋️ ジム ${nGym}回 ・ 🏥 クリニック ${nClinic}回</p>
+      <p class="small" style="margin:0 0 4px">🏋️ ジム ${nGym}回 ・ 🏥 クリニック ${nClinic}回${nRest ? ` ・ 🧘 休養日 ${nRest}回` : ''}</p>
       <div class="meter"><i style="width:${Math.min(100, (n / 5) * 100)}%"></i></div>
       <div class="meter-marks"><span>0</span><span>2 合格</span><span>3 良い</span><span>5 最高</span></div>
       <p class="small" style="margin:8px 0 0">${msg}</p>
@@ -921,7 +924,7 @@ function renderGym(v) {
                 w.skipped
                   ? `<div class="list-item" data-open="${w.id}"><b>${jpDate(w.date)}</b> <span class="muted">行けなかった（${esc(w.reason || '')}）</span></div>`
                   : `<div class="list-item" data-open="${w.id}"><div class="row" style="justify-content:space-between"><b>${jpDate(w.date)}</b><span>${placeOf(w) === 'clinic' ? '🏥' : '🏋️'} ${esc(w.name)}</span></div>
-                     <div class="meta">${esc(w.exercises.filter((e) => e.sets.length).map((e) => `${e.name} ${bestSet(e)}`).join('、'))}</div></div>`
+                     <div class="meta">${esc(w.exercises.filter((e) => e.sets.length).map((e) => `${e.name} ${bestSet(e)}`).join('、'))}${w.stretch ? ` ・ ストレッチ${w.stretch}分` : ''}</div></div>`
               )
               .join('')
           : '<p class="muted">まだ記録はありません。</p>'
@@ -948,7 +951,7 @@ function renderGym(v) {
 }
 
 // 自重で始める種目（記録するときに「自重」が最初から選ばれる）
-const BW_DEFAULT = new Set(['懸垂', '斜め懸垂', 'ディップス', '腕立て伏せ', 'アブローラー']);
+const BW_DEFAULT = new Set(['懸垂', '斜め懸垂', 'ディップス', '腕立て伏せ', 'アブローラー', 'レッグレイズ']);
 const RPE_LIST = ['6', '6.5', '7', '7.5', '8', '8.5', '9', '9.5', '10'];
 function setText(s) {
   const load = s.bw ? (s.kg ? `自重+${s.kg}kg` : '自重') : s.kg ? `${s.kg}kg` : '';
@@ -1033,6 +1036,7 @@ function openWorkout(id, tplKey, date) {
           <option value="__new">（自分で入力）</option>
         </select>
       </div>
+      <label class="field"><span>🧘 ストレッチ（任意）</span><span class="row"><input type="number" inputmode="numeric" class="num" id="w-stretch" value="${esc(w.stretch ?? '')}" placeholder="分"> 分</span></label>
       <label class="field"><span class="row" style="justify-content:space-between">メモ（調子、フォームで気づいたこと） ${voiceBtn('w-note')}</span>
         <textarea id="w-note">${esc(w.note)}</textarea></label>
       <div class="row">
@@ -1043,6 +1047,7 @@ function openWorkout(id, tplKey, date) {
     const sync = () => {
       w.date = $('#w-date', sheet).value || w.date;
       w.note = $('#w-note', sheet).value;
+      w.stretch = $('#w-stretch', sheet).value === '' ? '' : Number($('#w-stretch', sheet).value);
       $$('[data-kg]', sheet).forEach((i) => {
         const [ei, si] = i.dataset.kg.split('-').map(Number);
         if (!w.exercises[ei]?.sets[si]) return;
@@ -1303,6 +1308,7 @@ const EX_PARTS = {
   ダンベルカール: ['腕'],
   ルーマニアンデッドリフト: ['脚'],
   カーフレイズ: ['脚'],
+  レッグレイズ: ['腹'],
 };
 const partsOf = (name) => S.settings.exParts?.[name] || EX_PARTS[name] || ['その他'];
 let balanceMonth = null;
