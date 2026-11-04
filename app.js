@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 37; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 38; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -37,6 +37,7 @@ function dbPut(key, value) {
   });
 }
 function save(key) {
+  if (key === 'words') setTimeout(syncWordsToDrill, 0);
   return dbPut(key, S[key]).catch(() => toast('保存できませんでした'));
 }
 
@@ -1437,6 +1438,39 @@ function drillData() {
     return null;
   }
 }
+// 手帳の英単語を単語ドリルにも入れる（まだ送っていない語だけ。ドリルで消した語は送り直さない）
+const DRILL_SET = '手帳';
+function syncWordsToDrill() {
+  try {
+    const raw = localStorage.getItem(DRILL_KEY);
+    if (!raw) return 0; // このスマホでまだ単語ドリルを使っていない
+    const o = JSON.parse(raw);
+    if (!o || !Array.isArray(o.words)) return 0;
+    const sent = new Set(S.settings.drillSent || []);
+    const norm = (x) => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const have = new Set(o.words.map((w) => norm(w.w)));
+    let n = 0;
+    for (const w of S.words) {
+      if (w.lang !== 'en' || sent.has(w.id)) continue;
+      const meaning = String(w.meaning || '').split('\n')[0].trim();
+      if (!w.word || !meaning) continue; // 意味が入ってから送る
+      sent.add(w.id);
+      if (have.has(norm(w.word))) continue;
+      const ex = w.sentence || (w.sentences || [])[0] || '';
+      o.words.push({ id: 'k' + w.id, set: DRILL_SET, w: w.word.trim(), ja: meaning.slice(0, 80), ex, stage: 0, due: null, ok: 0, ng: 0, learned: null });
+      have.add(norm(w.word));
+      n++;
+    }
+    if (n) localStorage.setItem(DRILL_KEY, JSON.stringify(o));
+    if (sent.size !== (S.settings.drillSent || []).length) {
+      S.settings.drillSent = [...sent];
+      save('settings');
+    }
+    return n;
+  } catch (e) {
+    return 0;
+  }
+}
 function drillDays(from, to) {
   const o = drillData();
   if (!o || !o.days) return { min: 0, n: 0, c: 0 };
@@ -1485,7 +1519,7 @@ function drillCardHTML(t, ws) {
       <div class="stat"><div class="v">${drillStreak(o)}日</div><div class="l">連続</div></div>
     </div>
     <p class="small">学んだ単語 ${learned}語 ・ 定着 ${fixed}語${wk.n ? ` ・ 今週の正解率 ${Math.round((wk.c / wk.n) * 100)}%` : ''}</p>
-    <p class="muted">単語ドリルの時間は、今日の英語の時間に自動で入っています。</p>
+    <p class="muted">単語ドリルの時間は、今日の英語の時間に自動で入っています。言葉の手帳の英単語も、単語ドリルの「${DRILL_SET}」セットに自動で入ります。</p>
     <a class="btn sub wide" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box" href="${DRILL_URL}">単語ドリルを開く</a></div>`;
 }
 function readingMinutes(from, to) {
@@ -4463,6 +4497,7 @@ window.addEventListener('unhandledrejection', (e) => showError('処理', e.reaso
   }
   navigator.storage?.persist?.();
   cleanOrphanPhotos().catch(() => {});
+  syncWordsToDrill();
   if ('serviceWorker' in navigator) {
     // 新しい版が入ったら、1回だけ自動で読み込み直す
     let reloaded = false;
