@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 36; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 37; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -1426,11 +1426,67 @@ function openExParts() {
 }
 
 /* ========== 学び（英語・読書・言葉） ========== */
+// 単語ドリル（同じ住所の別アプリ）の記録を、このスマホの中で読むだけ。書きかえはしない。
+const DRILL_KEY = 'c-drill-v1';
+const DRILL_URL = '../c-drill-km27/';
+function drillData() {
+  try {
+    const o = JSON.parse(localStorage.getItem(DRILL_KEY) || 'null');
+    return o && Array.isArray(o.words) ? o : null;
+  } catch (e) {
+    return null;
+  }
+}
+function drillDays(from, to) {
+  const o = drillData();
+  if (!o || !o.days) return { min: 0, n: 0, c: 0 };
+  let ms = 0, n = 0, c = 0;
+  for (const [d, x] of Object.entries(o.days)) {
+    if (d < from || d > to || !x) continue;
+    ms += x.t || 0;
+    n += x.n || 0;
+    c += x.c || 0;
+  }
+  return { min: Math.round(ms / 60000), n, c };
+}
+function drillStreak(o) {
+  let d = today();
+  const has = (k) => o.days?.[k]?.n;
+  if (!has(d)) d = addDaysYmd(d, -1);
+  let n = 0;
+  while (has(d)) {
+    n++;
+    d = addDaysYmd(d, -1);
+  }
+  return n;
+}
+function addDaysYmd(s, n) {
+  const d = parseYmd(s);
+  d.setDate(d.getDate() + n);
+  return ymd(d);
+}
 function englishMinutes(from, to) {
   const inRange = (x) => x.date >= from && x.date <= to;
   const eng = S.engLogs.filter(inRange).reduce((a, x) => a + (x.minutes || 0), 0);
   const yosho = S.readLogs.filter((r) => inRange(r) && bookOf(r.bookId)?.genre === '洋書').reduce((a, x) => a + (x.minutes || 0), 0);
-  return eng + yosho;
+  return eng + yosho + drillDays(from, to).min;
+}
+function drillCardHTML(t, ws) {
+  const o = drillData();
+  if (!o) return `<div class="card"><h2>単語ドリル</h2><p class="muted">このスマホで単語ドリルを使うと、勉強した時間と問題数がここに自動で入ります。</p><a class="btn sub wide" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box" href="${DRILL_URL}">単語ドリルを開く</a></div>`;
+  const td = drillDays(t, t), wk = drillDays(ws, t);
+  const learned = o.words.filter((w) => (w.stage || 0) > 0).length;
+  const fixed = o.words.filter((w) => (w.stage || 0) >= 6).length;
+  return `<div class="card"><h2>単語ドリル <span>自動で記録</span></h2>
+    <div class="stats">
+      <div class="stat"><div class="v">${minutesLabel(td.min)}</div><div class="l">今日</div></div>
+      <div class="stat"><div class="v">${td.n}問</div><div class="l">今日の問題</div></div>
+      <div class="stat"><div class="v">${minutesLabel(wk.min)}</div><div class="l">今週</div></div>
+      <div class="stat"><div class="v">${drillStreak(o)}日</div><div class="l">連続</div></div>
+    </div>
+    <p class="small">学んだ単語 ${learned}語 ・ 定着 ${fixed}語${wk.n ? ` ・ 今週の正解率 ${Math.round((wk.c / wk.n) * 100)}%` : ''}</p>
+    <p class="muted">単語ドリルの時間は、今日の英語の時間に自動で入っています。</p>
+    <a class="btn sub wide" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box" href="${DRILL_URL}">単語ドリルを開く</a></div>`;
 }
 function readingMinutes(from, to) {
   return S.readLogs.filter((r) => r.date >= from && r.date <= to && bookOf(r.bookId)?.genre !== '洋書').reduce((a, x) => a + (x.minutes || 0), 0);
@@ -1471,6 +1527,7 @@ function renderEng(v) {
       <button class="btn sub wide" data-cap style="margin-top:8px">📷 洋書のページを取り込む（線を引いた単語）</button>
       <p class="muted">洋書は「読書」の本棚から記録すると、英語の時間にも入ります。</p>
     </div>
+    ${drillCardHTML(t, ws)}
     <div class="card">
       <h2>今週 <span>${minutesLabel(weekMin)}</span></h2>
       <div class="stats">${SKILLS.map((s) => `<div class="stat"><div class="v">${minutesLabel(skills[s] || 0)}</div><div class="l">${s}</div></div>`).join('')}</div>
