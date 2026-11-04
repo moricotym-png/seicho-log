@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 35; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 36; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -93,7 +93,7 @@ const AMOUNTS = ['ちょうどいい', '少し多い', '多すぎ'];
 const DAWDLE = [['none', 'なし'], ['some', '少し'], ['lots', '多い']];
 const SAVINGS = [['conbini', 'コンビニに行かなかった'], ['bottle', '水筒を持っていった'], ['bento', 'お弁当にした']];
 const TEMPLATES = {
-  sun: { name: '日曜 ジム（＋Push）', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'オーバーヘッドプレス', 'インクラインベンチプレス', 'ディップス'] },
+  sun: { name: '駒沢ジム（日曜・祝日 ＋Push）', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'オーバーヘッドプレス', 'インクラインベンチプレス', 'ディップス'] },
   tue: { name: '火曜 パーソナル（＋Pull）', place: 'gym', exercises: ['スクワット', 'ベンチプレス', 'デッドリフト', '懸垂', 'ラットプルダウン', 'アームカール'] },
   free: { name: 'ジム（自由）', place: 'gym', exercises: [] },
   cpush: { name: 'クリニック Push', place: 'clinic', ppl: 'push', exercises: ['ショルダープレス', 'サイドレイズ', '腕立て伏せ', 'フレンチプレス'] },
@@ -136,8 +136,9 @@ const LIFT_GOALS = [
 ];
 const placeOf = (w) => (w.tpl === 'clinic' ? 'clinic' : TEMPLATES[w.tpl]?.place || 'gym'); // 'clinic' は以前のメニュー
 // その週に、その種目を1セット以上やった日数
+// その週に、その種目を1セット以上やったトレーニングの回数（同じ日の2部練も別々に数える）
 function liftDays(ws, name) {
-  return new Set(weekWorkouts(ws).filter((w) => w.exercises.some((e) => e.name === name && e.sets.some((s) => s.reps))).map((w) => w.date)).size;
+  return weekWorkouts(ws).filter((w) => w.exercises.some((e) => e.name === name && e.sets.some((s) => s.reps))).length;
 }
 const EXTRA_EXERCISES = ['ダンベルプレス', 'ダンベルロウ', 'ショルダープレス', 'サイドレイズ', 'レッグプレス', '腕立て伏せ'];
 const ENG_KINDS = [
@@ -903,7 +904,7 @@ function renderGym(v) {
     ${balanceHTML()}
     <div class="card">
       <h2>トレーニングを始める</h2>
-      <h3>🏋️ ジム（バーベル高重量・日曜90分／火曜60分）</h3>
+      <h3>🏋️ ジム（バーベル高重量・駒沢は日曜祝日90分／パーソナルは火曜60分）</h3>
       <div class="row">${tplBtns('gym')}</div>
       <h3>🏥 クリニック（ダンベル・30分）</h3>
       <div class="row">${tplBtns('clinic')}</div>
@@ -4372,6 +4373,8 @@ window.addEventListener('unhandledrejection', (e) => showError('処理', e.reaso
     S[k] = val === undefined ? structuredClone(DEFAULTS[k]) : val;
   }
   if (!S.settings.clinicDays) S.settings.clinicDays = [...DEFAULTS.settings.clinicDays];
+  // 「日曜 ジム」は「駒沢ジム（日曜・祝日）」に名前を変えた
+  S.workouts.forEach((w) => w.tpl === 'sun' && w.name?.startsWith('日曜 ジム') && (w.name = TEMPLATES.sun.name));
   if (!S.settings.receiptSeeded) {
     const t = today();
     let y = Number(t.slice(0, 4));
