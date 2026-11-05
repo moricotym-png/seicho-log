@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 39; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 40; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4164,6 +4164,49 @@ function markBlogDay(date, on) {
   save('days');
 }
 
+// Claudeのアプリに記事を書いてもらうための頼む文章（医療広告のルールに沿うように頼む）
+const BLOG_STYLE_DEFAULT = { clinic: '当院', writer: '院長', reader: '近くにお住まいの一般の方', tone: 'やわらかく親しみやすい', length: '1,200〜1,600字' };
+const blogStyle = () => ({ ...BLOG_STYLE_DEFAULT, ...(S.settings.blogStyle || {}) });
+function blogPrompt(list) {
+  const st = blogStyle();
+  const topics = list
+    .map((b, i) => `【ネタ${list.length > 1 ? i + 1 : ''}】\n題名・ネタ：${b.title}${b.cat ? `\n分類：${b.cat}` : ''}${b.memo ? `\nメモ：${b.memo}` : ''}`)
+    .join('\n\n');
+  return `歯科医院のブログ記事を書いてください。${list.length > 1 ? `ネタが${list.length}つあるので、1つのネタにつき1本ずつ、別々の記事にしてください。` : ''}
+
+■ 書き方
+- 医院名・呼び方：${st.clinic}
+- 書き手：${st.writer}
+- 読んでほしい人：${st.reader}
+- 雰囲気：${st.tone}
+- 長さ：1本あたり${st.length}
+- 構成：タイトル案を3つ → 導入 → 見出しつきの本文 → まとめ → 押しつけない来院のひとこと
+- 専門用語は、使うときにかんたんな言いかえを添える
+
+■ 必ず守ること（医療広告ガイドライン）
+- 「絶対」「必ず治る」「最高」「日本一」「痛くない」など、誇大な表現・他院と比べる表現・効果を約束する表現を使わない
+- 患者さんの体験談や口コミを、効果の根拠として書かない
+- ビフォーアフター写真を使う前提の書き方をしない（使う場合は、治療内容・費用・期間・主なリスクや副作用を添える必要があると最後に注意書きする）
+- 自費診療に触れるときは、費用の目安・治療期間・主なリスクを書く欄を【要記入】として残す
+- 患者さんが特定できる情報（年齢と性別の組み合わせ、時期、地域など）を書かない
+- 数字や研究結果は、確かなものだけにして【要確認】の印をつける
+- 最後に、ガイドライン上で気になる表現があれば箇条書きで知らせる
+
+${topics}`;
+}
+
+async function copyBlogPrompt(list) {
+  if (!list.length) return toast('ネタがありません');
+  const text = blogPrompt(list);
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('コピーしました。Claudeのアプリに貼り付けて送ってください', 4000);
+  } catch {
+    const sheet = openSheet('頼む文章', `<p class="small">自動でコピーできませんでした。下の文章を長押しして「すべて選択」→「コピー」してください。</p><textarea style="min-height:300px">${esc(text)}</textarea>`);
+    $('textarea', sheet).select();
+  }
+}
+
 function renderBlog(v) {
   const t = today();
   const posted = blogWeek(t);
@@ -4181,7 +4224,13 @@ function renderBlog(v) {
       <div class="row" style="margin-top:6px">${voiceBtn('bl-quick')}<span class="muted">思いついたら、すぐ話して追加</span></div>
     </div>
     ${ready.length ? `<div class="card"><h2>投稿に近いもの</h2>${ready.map(row).join('')}</div>` : ''}
-    <div class="card"><h2>ネタ帳 <span>${by('idea').length}件</span></h2>${by('idea').map(row).join('') || '<p class="muted">まだありません。</p>'}</div>
+    <div class="card"><h2>ネタ帳 <span>${by('idea').length}件</span></h2>${by('idea').map(row).join('') || '<p class="muted">まだありません。</p>'}
+      ${by('idea').length ? `<button class="btn sub wide" data-blall style="margin-top:8px">ネタ帳の${by('idea').length}件をまとめてClaudeに頼む文章をコピー</button>` : ''}</div>
+    <details class="card"><summary><b>記事の書き方の設定</b>（頼む文章に入ります）</summary>
+      ${[['clinic', '医院名・呼び方'], ['writer', '書き手'], ['reader', '読んでほしい人'], ['tone', '雰囲気'], ['length', '1本の長さ']]
+        .map(([k, l]) => `<label class="field"><span>${l}</span><input type="text" data-bstyle="${k}" value="${esc(blogStyle()[k])}"></label>`)
+        .join('')}
+    </details>
     <div class="card"><h2>投稿したもの</h2>${by('posted').slice(0, 15).map(row).join('') || '<p class="muted">まだありません。</p>'}</div>`;
   const add = () => {
     const title = $('#bl-quick', v).value.trim();
@@ -4192,6 +4241,15 @@ function renderBlog(v) {
     render();
   };
   $('#bl-add', v).onclick = add;
+  $('[data-blall]', v)?.addEventListener('click', () => copyBlogPrompt(S.blog.filter((b) => b.stage === 'idea')));
+  $$('[data-bstyle]', v).forEach(
+    (inp) =>
+      (inp.onchange = () => {
+        S.settings.blogStyle = { ...blogStyle(), [inp.dataset.bstyle]: inp.value.trim() || BLOG_STYLE_DEFAULT[inp.dataset.bstyle] };
+        save('settings');
+        toast('書き方を保存しました');
+      })
+  );
   $('#bl-quick', v).onkeydown = (e) => e.key === 'Enter' && add();
   $$('[data-blog]', v).forEach((el) => (el.onclick = () => openBlog(el.dataset.blog)));
 }
@@ -4207,9 +4265,15 @@ function openBlog(id) {
     ${b.url ? `<p class="small"><a href="${esc(b.url)}" target="_blank" rel="noopener">開く</a></p>` : ''}
     <label class="field"><span>投稿した日</span><input type="date" id="bl-date" value="${esc(b.postedOn || '')}"></label>
     <p class="muted">患者さんの名前や、本人と分かる写真は入れないようにしましょう。</p>
+    <button class="btn sub wide" id="bl-ask" style="margin-bottom:8px">✍️ Claudeに記事を頼む文章をコピー</button>
+    <p class="muted" style="margin:0 0 10px">Claudeのアプリに貼って送ると、ブログ記事の下書きが返ってきます。下書きができたら「下書きあり」にしておきましょう。</p>
     <div class="row"><button class="btn grow" id="bl-save">保存</button>${b.stage === 'posted' ? '' : '<button class="btn sub" id="bl-post">投稿した！</button>'}<button class="btn ghost" id="bl-del">削除</button></div>`);
   bindChoices(sheet, 'blcat', () => {});
   bindChoices(sheet, 'blst', () => {});
+  $('#bl-ask', sheet).onclick = () => {
+    // 画面で直したメモも頼む文章に入れる
+    copyBlogPrompt([{ title: $('#bl-title', sheet).value.trim() || b.title, cat: picked(sheet, 'blcat') || '', memo: $('#bl-memo', sheet).value }]);
+  };
   const before = { stage: b.stage, postedOn: b.postedOn };
   const sync = () => {
     b.title = $('#bl-title', sheet).value.trim() || b.title;
