@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 38; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 39; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4387,9 +4387,15 @@ function openChore(id) {
     completeChore(existing);
   });
   $('#cd-undo', sheet)?.addEventListener('click', () => {
+    if (existing.repeat) {
+      const nd = nextDue(existing);
+      const extra = S.chores.find((x) => x.id !== existing.id && !x.done && x.title === existing.title && x.due === nd && !(x.note && x.note !== existing.note));
+      if (extra) S.chores = S.chores.filter((x) => x.id !== extra.id);
+    }
     existing.done = null;
     save('chores');
     closeSheet();
+    toast('未完了に戻しました');
     render();
   });
   $('#cd-del', sheet).onclick = () => {
