@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 41; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 42; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4353,8 +4353,67 @@ function completeChore(c) {
   }
   save('chores');
   const late = c.due ? daysBetween(c.due, t) : 0;
-  toast(late > 0 ? `終わりました（期限から${late}日）。次は早めにいきましょう` : '終わりました！期限内です');
+  const n = S.chores.filter((x) => x.done === t).length;
+  toast(late > 0 ? `終わりました（期限から${late}日）。今日${n}件目です` : `終わりました！今日${n}件目です`);
   render();
+}
+
+// 雑務の処理の記録：日ごと・月ごとの件数、追加から終えるまでの日数、先送りの具合
+const choreAdded = (c) => c.start || ymd(new Date(c.created));
+function choreStatsHTML() {
+  const t = today();
+  const done = S.chores.filter((c) => c.done);
+  const count = (from, to) => done.filter((c) => c.done >= from && c.done <= to).length;
+  const ws = weekStart(t);
+  const ms = t.slice(0, 8) + '01';
+  const monthDone = done.filter((c) => c.done >= ms);
+  const spans = monthDone.map((c) => Math.max(0, daysBetween(choreAdded(c), c.done)));
+  const avg = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : null);
+  const lateList = monthDone.filter((c) => c.due && c.done > c.due).map((c) => daysBetween(c.due, c.done));
+  const open = S.chores.filter((c) => !c.done);
+  const over = open.filter((c) => c.due && c.due < t).length;
+  const idle = open.filter((c) => !c.due && daysBetween(choreAdded(c), t) >= 7).length;
+  // 直近14日
+  const days = [...Array(14)].map((_, i) => addDays(t, i - 13));
+  const perDay = days.map((d) => count(d, d));
+  const maxD = Math.max(1, ...perDay);
+  // 直近6か月
+  const months = [...Array(6)].map((_, i) => {
+    const d = parseYmd(ms);
+    d.setMonth(d.getMonth() - (5 - i));
+    return ymd(d).slice(0, 7);
+  });
+  const perMonth = months.map((m) => {
+    const list = done.filter((c) => monthKey(c.done) === m);
+    return { m, n: list.length, late: list.filter((c) => c.due && c.done > c.due).length };
+  });
+  const maxM = Math.max(1, ...perMonth.map((x) => x.n));
+  return `<div class="card">
+    <h2>処理の記録</h2>
+    <div class="stats" style="grid-template-columns:repeat(3,1fr)">
+      <div class="stat"><div class="v">${count(t, t)}件</div><div class="l">今日</div></div>
+      <div class="stat"><div class="v">${count(ws, t)}件</div><div class="l">今週</div></div>
+      <div class="stat"><div class="v">${monthDone.length}件</div><div class="l">今月の累計</div></div>
+    </div>
+    <p class="small" style="margin:8px 0 0">今月、追加してから終えるまで 平均 <b>${avg(spans) ?? '-'}日</b></p>
+    <h3>先送りチェック</h3>
+    <div class="small">
+      <div class="row" style="justify-content:space-between"><span>期限を過ぎたまま</span><b style="color:${over ? 'var(--warn)' : 'inherit'}">${over}件</b></div>
+      <div class="row" style="justify-content:space-between"><span>期限なしで1週間以上手つかず</span><b style="color:${idle ? 'var(--warn)' : 'inherit'}">${idle}件</b></div>
+      <div class="row" style="justify-content:space-between"><span>今月、期限に遅れて終えた</span><b>${lateList.length}件${lateList.length ? `（平均${avg(lateList)}日遅れ）` : ''}</b></div>
+    </div>
+    <h3>この2週間（日ごとの件数）</h3>
+    <div class="dbars">${days
+      .map((d, i) => `<div class="dbar${d === t ? ' today' : ''}"><span class="n">${perDay[i] || ''}</span><i style="height:${(perDay[i] / maxD) * 60}px"></i><span class="d">${Number(d.slice(8))}</span></div>`)
+      .join('')}</div>
+    <h3>月ごとの累計</h3>
+    ${perMonth
+      .map(
+        (x) => `<div class="row small" style="margin:3px 0"><span style="width:44px">${Number(x.m.slice(5))}月</span>
+        <div class="meter grow" style="margin:0"><i style="width:${(x.n / maxM) * 100}%"></i></div><span style="width:92px;text-align:right">${x.n}件${x.late ? `（遅れ${x.late}）` : ''}</span></div>`
+      )
+      .join('')}
+  </div>`;
 }
 
 function renderChores(v) {
@@ -4394,6 +4453,7 @@ function renderChores(v) {
     <div class="card">
       ${open.length ? block(`期限を過ぎた ${over.length}件`, over) + block('今やること', now) + block('これから', soon) + block('期限なし', noDue) : '<p class="muted">ためている雑務はありません。すっきりですね！</p>'}
     </div>
+    ${choreStatsHTML()}
     <div class="card">
       <h2>今月終えた <span>${monthDone.length}件</span></h2>
       <p class="small" style="margin:0 0 6px">期限内 ${onTime}件 ・ 遅れ ${monthDone.length - onTime}件</p>
