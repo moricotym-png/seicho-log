@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 42; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 43; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -1834,7 +1834,7 @@ $('#btn-settings').onclick = () => {
       <p class="small">前回：${last ? jpDate(ymd(new Date(last))) : 'まだ'}</p>
       <p class="muted">「保存する」を押すと、送り先を選ぶ画面が出ます。Googleドライブを選んでください。</p>
       <button class="btn wide" id="bk-out">保存する</button>
-      <label class="btn sub wide" style="display:block;text-align:center;margin-top:8px">バックアップから戻す<input type="file" id="bk-in" accept=".json,application/json" hidden></label>
+      <label class="btn sub wide" style="display:block;text-align:center;margin-top:8px">バックアップから戻す<input type="file" id="bk-in" accept=".json,.txt,application/json,text/plain" hidden></label>
     </div>
     <div class="card">
       <h2>保存している量</h2>
@@ -1896,30 +1896,64 @@ async function showUsage(box) {
     <p class="muted" style="margin:6px 0 0">${kept ? '容量が足りなくなっても、勝手に消されない設定になっています。' : 'スマホの容量が足りなくなると消される可能性があります。ホーム画面に追加すると守られやすくなります。'}週1回のバックアップは続けてください。</p>`;
 }
 
-async function doBackup() {
+// バックアップ：①ファイルを作る → ②もう一度押して共有（Googleドライブ）またはダウンロード
+// ・Androidの共有は .json を受け付けないので、中身はJSONのまま .txt（text/plain）にする
+// ・共有は「押した直後」でないと断られるので、作るのと送るのを2回の押下に分ける
+let backupFile = null;
+async function makeBackupFile() {
   const data = { app: 'seicho-log', version: 1, savedAt: new Date().toISOString() };
   KEYS.forEach((k) => (data[k] = S[k]));
   data.photos = await photosForBackup();
-  const name = `seicho-log-${today()}.json`;
-  const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
+  const name = `seicho-log-backup-${today()}.txt`;
+  return new File([JSON.stringify(data)], name, { type: 'text/plain' });
+}
+function markBackedUp() {
+  S.settings.lastBackup = new Date().toISOString();
+  save('settings');
+}
+function downloadBackup(file) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+}
+async function doBackup() {
+  const sheet = openSheet('バックアップ', `<p class="small" id="bk-msg">ファイルを作っています…</p><div id="bk-btns"></div>`);
   try {
-    if (navigator.canShare?.({ files: [file] })) {
-      await navigator.share({ files: [file], title: name });
-    } else {
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(file);
-      a.download = name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    }
-    S.settings.lastBackup = new Date().toISOString();
-    await save('settings');
-    toast('バックアップしました');
-    closeSheet();
-    render();
-  } catch (err) {
-    if (err?.name !== 'AbortError') toast('バックアップできませんでした');
+    backupFile = await makeBackupFile();
+  } catch (e) {
+    $('#bk-msg', sheet).textContent = 'ファイルを作れませんでした：' + (e?.message || e);
+    return;
   }
+  const mb = (backupFile.size / 1e6).toFixed(1);
+  const canShare = navigator.canShare?.({ files: [backupFile] });
+  $('#bk-msg', sheet).innerHTML = `ファイルができました（${mb}MB）。<br>${
+    canShare ? '「Googleドライブに保存」を押して、送り先に<b>ドライブ</b>を選んでください。' : 'このスマホでは共有が使えないので、「ダウンロード」で保存してください。'
+  }`;
+  $('#bk-btns', sheet).innerHTML = `
+    ${canShare ? '<button class="btn wide" id="bk-share">Googleドライブに保存（共有）</button>' : ''}
+    <button class="btn sub wide" id="bk-dl" style="margin-top:8px">スマホにダウンロード</button>
+    <p class="muted" style="margin-top:8px">ダウンロードしたファイルは「Files」アプリの「ダウンロード」に入ります。そこからGoogleドライブにアップロードもできます。</p>`;
+  $('#bk-share', sheet)?.addEventListener('click', async () => {
+    try {
+      await navigator.share({ files: [backupFile], title: backupFile.name });
+      markBackedUp();
+      closeSheet();
+      toast('バックアップしました');
+      render();
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
+      toast('共有できませんでした。「スマホにダウンロード」を試してください', 5000);
+    }
+  });
+  $('#bk-dl', sheet).onclick = () => {
+    downloadBackup(backupFile);
+    markBackedUp();
+    toast('ダウンロードしました（Files →ダウンロード）', 5000);
+  };
 }
 
 async function restore(file) {
