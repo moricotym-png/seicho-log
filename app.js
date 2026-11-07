@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 43; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 44; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -1450,14 +1450,29 @@ function syncWordsToDrill() {
     const norm = (x) => String(x || '').trim().toLowerCase().replace(/\s+/g, ' ');
     const have = new Set(o.words.map((w) => norm(w.w)));
     let n = 0;
+    const ipaOf = (w) => String(w.reading || '').trim().replace(/^\/+|\/+$/g, '');
+    const byId = new Map(o.words.map((x) => [x.id, x]));
     for (const w of S.words) {
-      if (w.lang !== 'en' || sent.has(w.id)) continue;
+      if (w.lang !== 'en') continue;
+      if (sent.has(w.id)) {
+        // 前に送った語に、発音記号とメモがまだなければ足す
+        const d = byId.get('k' + w.id);
+        if (d && ((!d.ipa && ipaOf(w)) || (!d.note && w.note))) {
+          if (!d.ipa && ipaOf(w)) d.ipa = ipaOf(w);
+          if (!d.note && w.note) d.note = w.note;
+          n++;
+        }
+        continue;
+      }
       const meaning = String(w.meaning || '').split('\n')[0].trim();
       if (!w.word || !meaning) continue; // 意味が入ってから送る
       sent.add(w.id);
       if (have.has(norm(w.word))) continue;
       const ex = w.sentence || (w.sentences || [])[0] || '';
-      o.words.push({ id: 'k' + w.id, set: DRILL_SET, w: w.word.trim(), ja: meaning.slice(0, 80), ex, stage: 0, due: null, ok: 0, ng: 0, learned: null });
+      const nw = { id: 'k' + w.id, set: DRILL_SET, w: w.word.trim(), ja: meaning.slice(0, 80), ex, stage: 0, due: null, ok: 0, ng: 0, learned: null };
+      if (ipaOf(w)) nw.ipa = ipaOf(w);
+      if (w.note) nw.note = w.note;
+      o.words.push(nw);
       have.add(norm(w.word));
       n++;
     }
