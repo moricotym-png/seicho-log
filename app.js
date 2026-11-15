@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 44; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 45; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -926,7 +926,8 @@ function renderGym(v) {
                 w.skipped
                   ? `<div class="list-item" data-open="${w.id}"><b>${jpDate(w.date)}</b> <span class="muted">行けなかった（${esc(w.reason || '')}）</span></div>`
                   : `<div class="list-item" data-open="${w.id}"><div class="row" style="justify-content:space-between"><b>${jpDate(w.date)}</b><span>${placeOf(w) === 'clinic' ? '🏥' : '🏋️'} ${esc(w.name)}</span></div>
-                     <div class="meta">${esc(w.exercises.filter((e) => e.sets.length).map((e) => `${e.name} ${bestSet(e)}`).join('、'))}${w.stretch ? ` ・ ストレッチ${w.stretch}分` : ''}</div></div>`
+                     <div class="meta">${esc(w.exercises.filter((e) => e.sets.length).map((e) => `${e.name} ${bestSet(e)}`).join('、'))}${w.stretch ? ` ・ ストレッチ${w.stretch}分` : ''}</div>
+                     ${w.exercises.some((e) => exVolume(e)) ? `<div class="meta">ボリューム ${fmtKg(w.exercises.reduce((a, e) => a + exVolume(e), 0))}</div>` : ''}</div>`
               )
               .join('')
           : '<p class="muted">まだ記録はありません。</p>'
@@ -1316,22 +1317,37 @@ const partsOf = (name) => S.settings.exParts?.[name] || EX_PARTS[name] || ['そ�
 let balanceMonth = null;
 
 // その月の、日ごと・部位ごとのセット数
+// 1セットのボリューム（重量×回数）。自重の種目は、体重が分かれば体重＋付けた重りで数える
+function setVolume(st) {
+  const reps = Number(st.reps) || 0;
+  const load = st.bw ? (Number(bodyWeight()) || 0) + (Number(st.kg) || 0) : Number(st.kg) || 0;
+  return load * reps;
+}
+const exVolume = (e) => e.sets.reduce((a, st) => a + setVolume(st), 0);
+const fmtKg = (n) => `${Math.round(n).toLocaleString()}kg`;
+let balanceMode = 'sets';
+
 function monthParts(ym) {
   const days = {};
   const total = Object.fromEntries(PARTS.map(([p]) => [p, 0]));
+  const vol = Object.fromEntries(PARTS.map(([p]) => [p, 0]));
+  let sum = 0; // 2つの部位に効く種目も1回だけ数えた合計
   for (const w of S.workouts) {
     if (w.skipped || monthKey(w.date) !== ym) continue;
     for (const e of w.exercises) {
       const n = e.sets.filter((s) => s.reps).length;
       if (!n) continue;
+      const v = exVolume(e);
+      sum += v;
       for (const p of partsOf(e.name)) {
         total[p] += n;
+        vol[p] += v;
         days[w.date] = days[w.date] || {};
         days[w.date][p] = (days[w.date][p] || 0) + n;
       }
     }
   }
-  return { days, total };
+  return { days, total, vol, sum };
 }
 const prevMonth = (ym) => {
   const d = parseYmd(ym + '-01');
@@ -1342,7 +1358,12 @@ const prevMonth = (ym) => {
 function balanceHTML() {
   const ym = balanceMonth || today().slice(0, 7);
   const cur = monthParts(ym);
-  const last = monthParts(prevMonth(ym)).total;
+  const lastAll = monthParts(prevMonth(ym));
+  const last = lastAll.total;
+  const isVol = balanceMode === 'vol';
+  const curV = isVol ? cur.vol : cur.total;
+  const lastV = isVol ? lastAll.vol : last;
+  const fmtV = (n) => (isVol ? fmtKg(n) : n);
   const first = parseYmd(ym + '-01');
   const lead = (first.getDay() + 6) % 7; // 月曜はじまり
   const nDays = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
@@ -1355,7 +1376,7 @@ function balanceHTML() {
     cells.push(`<button type="button" class="cal-d${date === today() ? ' today' : ''}${tags.length ? ' has' : ''}" data-cal="${date}"><b>${d}</b>${tags.join('')}</button>`);
   }
   const shown = PARTS.filter(([p]) => p !== 'その他' || cur.total[p] || last[p]);
-  const max = Math.max(1, ...shown.map(([p]) => Math.max(cur.total[p], last[p])));
+  const max = Math.max(1, ...shown.map(([p]) => Math.max(curV[p], lastV[p])));
   const trained = shown.filter(([p]) => p !== 'その他');
   const low = trained.filter(([p]) => cur.total[p] === Math.min(...trained.map(([q]) => cur.total[q])));
   const isNow = ym === today().slice(0, 7);
@@ -1364,23 +1385,30 @@ function balanceHTML() {
     <h2>部位のバランス</h2>
     <div class="nav"><button class="btn ghost sm" data-bm="-1">◀</button><b>${first.getFullYear()}年${first.getMonth() + 1}月</b><button class="btn ghost sm" data-bm="1" ${isNow ? 'style="visibility:hidden"' : ''}>▶</button></div>
     <div class="cal">${['月', '火', '水', '木', '金', '土', '日'].map((w) => `<div class="cal-h">${w}</div>`).join('')}${cells.join('')}</div>
-    <h3>部位ごとのセット数</h3>
-    <div class="bars">
+    <div class="row" style="justify-content:space-between;margin-top:12px"><h3 style="margin:0">部位ごとの${isVol ? 'ボリューム' : 'セット数'}</h3>${choicesHTML('bmode', [['sets', 'セット数'], ['vol', 'ボリューム']], balanceMode)}</div>
+    <div class="bars${isVol ? ' vol' : ''}" style="margin-top:8px">
       ${shown
         .map(
           ([p, c]) => `<div class="bar-row"><span class="bar-l"><i style="background:${c}"></i>${p}</span>
-          <span class="bar-t"><span class="bar" style="width:${(cur.total[p] / max) * 100}%;background:${c}"></span><span class="bar ghost" style="width:${(last[p] / max) * 100}%"></span></span>
-          <span class="bar-v"><b>${cur.total[p]}</b><span class="muted">／${last[p]}</span></span></div>`
+          <span class="bar-t"><span class="bar" style="width:${(curV[p] / max) * 100}%;background:${c}"></span><span class="bar ghost" style="width:${(lastV[p] / max) * 100}%"></span></span>
+          <span class="bar-v"><b>${fmtV(curV[p])}</b><span class="muted">／${fmtV(lastV[p])}</span></span></div>`
         )
         .join('')}
     </div>
-    <p class="muted" style="margin:6px 0 0">色の棒＝${isNow ? '今月' : 'この月'}、灰色の棒＝前の月（数字は セット数／前の月）</p>
+    ${isVol ? `<p class="small" style="margin:6px 0 0">${isNow ? '今月' : 'この月'}の合計 <b>${fmtKg(cur.sum)}</b></p>` : ''}
+    <p class="muted" style="margin:6px 0 0">色の棒＝${isNow ? '今月' : 'この月'}、灰色の棒＝前の月（数字は ${isVol ? 'ボリューム' : 'セット数'}／前の月）${
+      isVol ? `<br>ボリューム＝重量×回数を全セット足したもの。2つの部位に効く種目は両方に入ります。自重の種目は${bodyWeight() ? `体重${bodyWeight()}kg＋重りで計算` : '体重が未入力のため重りの分だけで計算（「体の感覚」で体重を入れると反映）'}。` : ''
+    }</p>
     ${isNow && low.length && Object.values(cur.total).some(Boolean) ? `<p class="small" style="margin:8px 0 0">今月まだ少ないのは <b>${low.map(([p]) => p).join('・')}</b> です。次のトレーニングで足してみましょう。</p>` : ''}
     ${unknown.length ? `<button class="btn ghost sm" data-parts style="margin-top:8px">部位が決まっていない種目 ${unknown.length}つ</button>` : ''}
   </div>`;
 }
 
 function bindBalance(v) {
+  bindChoices(v, 'bmode', (x) => {
+    balanceMode = x || 'sets';
+    render();
+  });
   $$('[data-bm]', v).forEach(
     (b) =>
       (b.onclick = () => {

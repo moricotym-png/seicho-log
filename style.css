@@ -193,3 +193,5 @@ select.rpe { width: auto; padding: 6px 8px; font-size: 14px; }
 .dbar .n { color: var(--ink); font-size: 11px; min-height: 14px; }
 .dbar .d { margin-top: 2px; }
 .dbar.today .d { color: var(--accent); font-weight: 700; }
+
+.bars.vol .bar-row { grid-template-columns: 52px 1fr 120px; }
