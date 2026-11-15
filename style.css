@@ -195,3 +195,6 @@ select.rpe { width: auto; padding: 6px 8px; font-size: 14px; }
 .dbar.today .d { color: var(--accent); font-weight: 700; }
 
 .bars.vol .bar-row { grid-template-columns: 52px 1fr 120px; }
+
+.ptag-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: none; border: 0; padding: 2px 0 4px; font: inherit; color: inherit; text-align: left; }
+.ptag-row .pt { font-size: 12px; }

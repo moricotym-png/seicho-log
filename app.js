@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 45; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 46; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -999,6 +999,7 @@ function openWorkout(id, tplKey, date) {
         note: '',
       };
 
+  const xpOpen = new Set(); // 部位を編集中の種目
   const draw = () => {
     const sheet = openSheet(esc(w.name), `
       <label class="field"><span>日付</span><input type="date" id="w-date" value="${w.date}"></label>
@@ -1009,6 +1010,12 @@ function openWorkout(id, tplKey, date) {
             const prev = prevOf(e.name, w.id, w.date);
             return `<div class="exercise">
               <div class="row" style="justify-content:space-between"><b>${esc(e.name)}</b><button class="btn ghost sm" data-rmex="${ei}">外す</button></div>
+              <button type="button" class="ptag-row" data-xpopen="${ei}">${partsOf(e.name)
+                .map((pt) => `<span class="pt"><i style="background:${PART_COLOR[pt]}"></i>${pt}</span>`)
+                .join('')}<span class="muted small">${partsOf(e.name)[0] === 'その他' ? '部位を決める ✎' : '✎'}</span></button>
+              ${xpOpen.has(ei) ? `<div class="choices" style="margin:4px 0 6px">${PARTS.filter(([pt]) => pt !== 'その他')
+                .map(([pt]) => `<button type="button" class="choice sm${partsOf(e.name).includes(pt) ? ' on' : ''}" data-xpt="${ei}" data-pt="${pt}">${pt}</button>`)
+                .join('')}</div>` : ''}
               <div class="prev">${prev ? `前回 ${jpDate(prev.date)}：${prev.sets.map(setText).join(' / ')}` : '前回の記録なし'}</div>
               ${e.sets
                 .map(
@@ -1098,7 +1105,17 @@ function openWorkout(id, tplKey, date) {
         redraw();
       } else if (t.dataset.rmex !== undefined) {
         sync();
+        xpOpen.clear();
         w.exercises.splice(Number(t.dataset.rmex), 1);
+        redraw();
+      } else if (t.closest('[data-xpopen]')) {
+        sync();
+        const ei = Number(t.closest('[data-xpopen]').dataset.xpopen);
+        xpOpen.has(ei) ? xpOpen.delete(ei) : xpOpen.add(ei);
+        redraw();
+      } else if (t.dataset.xpt !== undefined) {
+        sync();
+        setExParts(w.exercises[Number(t.dataset.xpt)].name, t.dataset.pt);
         redraw();
       }
     });
@@ -1314,6 +1331,13 @@ const EX_PARTS = {
   レッグレイズ: ['腹'],
 };
 const partsOf = (name) => S.settings.exParts?.[name] || EX_PARTS[name] || ['その他'];
+function setExParts(name, pt) {
+  const cur = partsOf(name).filter((x) => x !== 'その他');
+  const next = cur.includes(pt) ? cur.filter((x) => x !== pt) : [...cur, pt];
+  S.settings.exParts = S.settings.exParts || {};
+  S.settings.exParts[name] = next.length ? next : ['その他'];
+  save('settings');
+}
 let balanceMonth = null;
 
 // その月の、日ごと・部位ごとのセット数
@@ -1400,7 +1424,8 @@ function balanceHTML() {
       isVol ? `<br>ボリューム＝重量×回数を全セット足したもの。2つの部位に効く種目は両方に入ります。自重の種目は${bodyWeight() ? `体重${bodyWeight()}kg＋重りで計算` : '体重が未入力のため重りの分だけで計算（「体の感覚」で体重を入れると反映）'}。` : ''
     }</p>
     ${isNow && low.length && Object.values(cur.total).some(Boolean) ? `<p class="small" style="margin:8px 0 0">今月まだ少ないのは <b>${low.map(([p]) => p).join('・')}</b> です。次のトレーニングで足してみましょう。</p>` : ''}
-    ${unknown.length ? `<button class="btn ghost sm" data-parts style="margin-top:8px">部位が決まっていない種目 ${unknown.length}つ</button>` : ''}
+    <p class="muted" style="margin:6px 0 0">「その他」は、効く部位をまだ決めていない種目の分です。</p>
+    <button class="btn ghost sm" data-parts style="margin-top:8px">種目と効く部位を確認・変更${unknown.length ? `（未設定 ${unknown.length}つ：${esc(unknown.slice(0, 3).join('、'))}${unknown.length > 3 ? ' など' : ''}）` : ''}</button>
   </div>`;
 }
 
@@ -1436,20 +1461,29 @@ function bindBalance(v) {
 
 // 部位が決まっていない種目に部位を付ける
 function openExParts() {
-  const names = [...new Set(S.workouts.flatMap((w) => (w.skipped ? [] : w.exercises.map((e) => e.name))))].filter((n) => !EX_PARTS[n]);
-  const sheet = openSheet('種目の部位', `
-    <p class="muted">鍛える部位を選んでください（いくつでも）。</p>
-    ${names.map((n, i) => `<h3>${esc(n)}</h3>${multiHTML('xp' + i, PARTS.map(([p]) => p).filter((p) => p !== 'その他'), S.settings.exParts?.[n] || [])}`).join('')}
+  const used = S.workouts.flatMap((w) => (w.skipped ? [] : w.exercises.map((e) => e.name)));
+  const all = [...new Set([...Object.values(TEMPLATES).flatMap((t) => t.exercises), ...used, ...Object.keys(EX_PARTS), ...EXTRA_EXERCISES])];
+  const names = [...all.filter((n) => partsOf(n)[0] === 'その他'), ...all.filter((n) => partsOf(n)[0] !== 'その他')];
+  const sheet = openSheet('種目と効く部位', `
+    <p class="muted">種目ごとに、効く部位を選んでください（いくつでも）。どれも選ばないと「その他」になります。トレーニングの記録画面で種目名の下を押しても変えられます。</p>
+    ${names
+      .map(
+        (n, i) => `<h3>${esc(n)}${partsOf(n)[0] === 'その他' ? ' <span style="color:var(--warn)">（未設定）</span>' : ''}</h3>${multiHTML('xp' + i, PARTS.map(([pt]) => pt).filter((pt) => pt !== 'その他'), partsOf(n).filter((pt) => pt !== 'その他'))}`
+      )
+      .join('')}
     <button class="btn wide" id="xp-save" style="margin-top:12px">保存</button>`);
   $('#xp-save', sheet).onclick = () => {
     S.settings.exParts = S.settings.exParts || {};
     names.forEach((n, i) => {
       const ps = readMulti(sheet, 'xp' + i);
-      if (ps.length) S.settings.exParts[n] = ps;
-      else delete S.settings.exParts[n];
+      const def = EX_PARTS[n] || ['その他'];
+      const val = ps.length ? ps : ['その他'];
+      if (val.join() === def.join()) delete S.settings.exParts[n];
+      else S.settings.exParts[n] = val;
     });
     save('settings');
     closeSheet();
+    toast('部位を保存しました');
     render();
   };
 }
