@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 46; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 47; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -76,6 +76,7 @@ const DEFAULTS = {
     { id: 'l1', name: '保定装置', steps: ['設計', 'プリント', '仕上げ'] },
     { id: 'l2', name: 'マウスピース矯正のマウスピース', steps: ['設計', 'プリント', '仕上げ'] },
     { id: 'l3', name: 'サージカルステント', steps: ['設計', 'プリント', '仕上げ'] },
+    { id: 'l4', name: 'インハウススプリント', steps: ['設計', 'プリント', '仕上げ'] },
   ],
   cases: [],
   notes: [],
@@ -4714,6 +4715,13 @@ window.addEventListener('unhandledrejection', (e) => showError('処理', e.reaso
   if (!S.settings.clinicDays) S.settings.clinicDays = [...DEFAULTS.settings.clinicDays];
   // 「日曜 ジム」は「駒沢ジム（日曜・祝日）」に名前を変えた
   S.workouts.forEach((w) => w.tpl === 'sun' && w.name?.startsWith('日曜 ジム') && (w.name = TEMPLATES.sun.name));
+  // 院内技工の種類に「インハウススプリント」を足す（すでに使っている人にも1回だけ）
+  if (!S.settings.splintSeeded) {
+    if (!S.labTypes.some((t) => t.name === 'インハウススプリント')) S.labTypes.push({ id: 'l4', name: 'インハウススプリント', steps: ['設計', 'プリント', '仕上げ'] });
+    S.settings.splintSeeded = true;
+    save('labTypes');
+    save('settings');
+  }
   if (!S.settings.receiptSeeded) {
     const t = today();
     let y = Number(t.slice(0, 4));
