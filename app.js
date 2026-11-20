@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 47; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 48; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -2724,7 +2724,7 @@ function renderLab(v) {
     const sub = j.finished
       ? `着手まで${daysBetween(j.ordered, j.started)}日・作業${secLabel(jobSec(j))}${j.record ? ' 🏆' : ''}`
       : `${jpDate(j.ordered)}受注${due}${jobSec(j) ? `・作業${secLabel(jobSec(j))}` : ''}`;
-    return `<div class="list-item" data-job="${j.id}"><div class="row" style="justify-content:space-between"><b>${esc(labTypeName(j))}${j.mark ? ` <span class="muted">${esc(j.mark)}</span>` : ''}</b><span class="small">${right}</span></div>
+    return `<div class="list-item" data-job="${j.id}"><div class="row" style="justify-content:space-between"><b>${j.group ? '🔗 ' : ''}${esc(labTypeName(j))}${j.mark ? ` <span class="muted">${esc(j.mark)}</span>` : ''}</b><span class="small">${right}</span></div>
       <div class="meta">${sub}</div></div>`;
   };
 
@@ -2860,7 +2860,13 @@ function openLabJob(id) {
     };
     const bestAll = bestTotal(j.typeId, j.id);
     const sheet = openSheet(isNew ? '受注を記録' : esc(labTypeName(j)), `
-      <h3>種類</h3>${choicesHTML('ltype', S.labTypes.map((x) => [x.id, x.name]), j.typeId)}
+      ${
+        isNew
+          ? `<h3>種類（同時に作るものは、いくつでも選べます）</h3>${multiHTML('ltypes', S.labTypes.map((x) => x.name), [labTypeName(j)])}`
+          : `<h3>種類</h3>${choicesHTML('ltype', S.labTypes.map((x) => [x.id, x.name]), j.typeId)}${
+              j.group ? `<p class="small" style="margin:4px 0 0">🔗 同時製作：${esc(S.labs.filter((x) => x.group === j.group && x.id !== j.id).map(labTypeName).join('、'))}</p>` : ''
+            }`
+      }
       <div class="row">
         <label class="field grow"><span>受注日</span><input type="date" id="l-ord" value="${j.ordered}"></label>
         <label class="field grow"><span>使う日（装着・手術など。任意）</span><input type="date" id="l-due" value="${esc(j.due || '')}"></label>
@@ -2893,7 +2899,15 @@ function openLabJob(id) {
       </div>`);
 
     const sync = () => {
-      const tid = picked(sheet, 'ltype') || j.typeId;
+      if (isNew) {
+        const names = readMulti(sheet, 'ltypes');
+        const first = S.labTypes.find((x) => x.name === names[0]);
+        if (first && first.id !== j.typeId) {
+          j.typeId = first.id;
+          j.steps = first.steps.map((name) => ({ name, done: false }));
+        }
+      }
+      const tid = (isNew ? j.typeId : picked(sheet, 'ltype')) || j.typeId;
       if (tid !== j.typeId && !j.steps.some((s) => s.done) && !jobSec(j) && !j.running) {
         const tp = S.labTypes.find((x) => x.id === tid);
         j.steps = tp.steps.map((name) => ({ name, done: false }));
@@ -2909,7 +2923,19 @@ function openLabJob(id) {
     };
     const commit = () => {
       sync();
-      if (!S.labs.includes(j)) S.labs.push(j);
+      if (!S.labs.includes(j)) {
+        S.labs.push(j);
+        // 2つ目以降の種類は、同じ受注日・使う日・目印で別の記録にする
+        const others = isNew ? readMulti(sheet, 'ltypes').slice(1) : [];
+        if (others.length) {
+          j.group = j.group || uid();
+          for (const name of others) {
+            const tp = S.labTypes.find((x) => x.name === name);
+            if (!tp) continue;
+            S.labs.push({ id: uid(), created: Date.now(), typeId: tp.id, typeName: tp.name, ordered: j.ordered, due: j.due, mark: j.mark, note: j.note, steps: tp.steps.map((n) => ({ name: n, done: false })), sessions: [], started: null, finished: null, running: null, group: j.group });
+          }
+        }
+      }
       save('labs');
     };
     const redraw = () => {
@@ -2965,12 +2991,15 @@ function openLabJob(id) {
       })
     );
     $('#l-save', sheet).onclick = () => {
+      if (isNew && !readMulti(sheet, 'ltypes').length) return toast('種類を選んでください');
+      const n = isNew ? readMulti(sheet, 'ltypes').length : 1;
       commit();
       closeSheet();
-      toast(isNew ? '受注を記録しました。早めに着手しましょう' : '保存しました');
+      toast(isNew ? (n > 1 ? `${n}件の受注を記録しました（同時製作）` : '受注を記録しました。早めに着手しましょう') : '保存しました');
       render();
     };
     $('#l-now', sheet)?.addEventListener('click', () => {
+      if (!readMulti(sheet, 'ltypes').length) return toast('種類を選んでください');
       commit();
       startLabTimer(j, 0);
       closeSheet();
