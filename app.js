@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION = 50; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 51; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'biz', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'biz', 'bigcases', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -85,6 +85,7 @@ const DEFAULTS = {
   papers: [],
   blog: [],
   biz: [],
+  bigcases: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
@@ -4476,7 +4477,18 @@ function renderBiz(v) {
       <p class="muted" style="margin:0 0 8px">入っている数字をまとめた頼む文章をコピーします。Claudeのアプリに貼ると、傾向の読み取りと打ち手の提案が返ってきます。</p>
       <button class="btn wide" id="biz-ask">Claudeに分析を頼む文章をコピー</button></div>`
         : ''
-    }`;
+    }
+    ${bigCasesHTML()}`;
+  $('#big-add', v).onclick = () => openBigCase(null);
+  $$('[data-big]', v).forEach((el) => (el.onclick = () => openBigCase(el.dataset.big)));
+  $('#big-ask', v)?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(bigAskPrompt());
+      toast('コピーしました。Claudeのアプリに貼り付けて送ってください', 4000);
+    } catch {
+      toast('自動でコピーできませんでした', 3000);
+    }
+  });
   bindChoices(v, 'bizyr', (x) => {
     bizYear = x || yr;
     render();
@@ -4512,6 +4524,184 @@ function renderBiz(v) {
       toast('数字の部分が見つかりませんでした。返事の最後のコード欄をコピーしてください', 5000);
     }
   };
+}
+
+/* ---------- 大型症例の収支（50万円以上の自費） ---------- */
+// 患者さんの名前は入れない（目印はカルテ番号の下2けたなど）。金額は万円、期間は月。
+const BIG_KINDS = ['全顎矯正', 'インプラント', 'フルマウス', 'その他'];
+const BIG_STATUS = [['contract', '契約済み'], ['treat', '治療中'], ['done', '完了']];
+const monthsBetween = (a, b) => (a && b ? Math.round((daysBetween(a, b) / 30.4) * 10) / 10 : null);
+function bigCalc(c) {
+  const revenue = (Number(c.contract) || 0) + ((Number(c.insPoints) || 0) * 10) / 10000;
+  const cost = (Number(c.lab) || 0) + (Number(c.material) || 0) + (Number(c.otherCost) || 0);
+  const profit = revenue - cost;
+  const visits = c.visitDates?.length || Number(c.visits) || 0;
+  const months = monthsBetween(c.start, c.end || (c.status === 'done' ? '' : c.start && today()));
+  return {
+    revenue,
+    cost,
+    profit,
+    rate: revenue ? profit / revenue : null,
+    visits,
+    months,
+    perHour: c.chairHours ? profit / Number(c.chairHours) : null,
+    visitDiff: c.planVisits && visits ? visits - Number(c.planVisits) : null,
+    monthDiff: c.planMonths && months != null ? Math.round((months - Number(c.planMonths)) * 10) / 10 : null,
+  };
+}
+const man1 = (n) => `${(Math.round(n * 10) / 10).toLocaleString()}万円`;
+const sign = (n) => (n > 0 ? `＋${n}` : `${n}`);
+
+function bigCasesHTML() {
+  const list = [...S.bigcases].sort((a, b) => ((a.contractOn || '') < (b.contractOn || '') ? 1 : -1));
+  const done = list.filter((c) => c.status === 'done' && bigCalc(c).rate != null);
+  const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
+  const byKind = BIG_KINDS.map((k) => {
+    const xs = done.filter((c) => c.kind === k).map(bigCalc);
+    return { k, n: xs.length, rate: avg(xs.map((x) => x.rate)), vd: avg(xs.filter((x) => x.visitDiff != null).map((x) => x.visitDiff)), md: avg(xs.filter((x) => x.monthDiff != null).map((x) => x.monthDiff)) };
+  }).filter((x) => x.n);
+  return `<div class="card">
+    <h2>大型症例の収支 <span class="small">${list.length}件</span></h2>
+    <p class="muted" style="margin:0 0 8px">50万円以上の全顎矯正・インプラント・フルマウスなど。名前は入れず、目印（カルテ番号の下2けたなど）で記録します。</p>
+    ${
+      byKind.length
+        ? `<table class="biz-t"><tr><th>種類（完了）</th><th>件数</th><th>利益率</th><th>回数の差</th><th>期間の差</th></tr>${byKind
+            .map(
+              (x) => `<tr><td>${x.k}</td><td>${x.n}</td><td>${Math.round(x.rate * 100)}%</td><td>${x.vd != null ? sign(Math.round(x.vd * 10) / 10) + '回' : '-'}</td><td>${x.md != null ? sign(Math.round(x.md * 10) / 10) + 'か月' : '-'}</td></tr>`
+            )
+            .join('')}</table><p class="muted" style="margin:4px 0 8px">差は「実際 − 見通し」。プラスなら見通しより多くかかっています。</p>`
+        : ''
+    }
+    ${list
+      .map((c) => {
+        const x = bigCalc(c);
+        return `<div class="list-item" data-big="${c.id}"><div class="row" style="justify-content:space-between"><b>${esc(c.kind)}${c.mark ? ` <span class="muted">${esc(c.mark)}</span>` : ''}</b>
+          <span class="small">${esc(BIG_STATUS.find((s) => s[0] === c.status)?.[1] || '')}</span></div>
+          <div class="meta">契約${man1(Number(c.contract) || 0)}${x.rate != null && x.cost ? ` ・ 利益${man1(x.profit)}（${Math.round(x.rate * 100)}%）` : ''}${x.visits ? ` ・ ${x.visits}回` : ''}${x.months != null ? ` ・ ${x.months}か月` : ''}</div>
+          ${x.visitDiff != null || x.monthDiff != null ? `<div class="meta">見通しとの差：${x.visitDiff != null ? `回数${sign(x.visitDiff)}` : ''}${x.monthDiff != null ? ` 期間${sign(x.monthDiff)}か月` : ''}</div>` : ''}</div>`;
+      })
+      .join('')}
+    <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
+    ${done.length ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
+  </div>`;
+}
+
+function bigAskPrompt() {
+  const rows = S.bigcases
+    .filter((c) => c.status === 'done')
+    .map((c) => {
+      const x = bigCalc(c);
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}`;
+    });
+  return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
+
+■ お願い
+- 種類ごとに、利益率と、見通しと実際の差（回数・期間）の傾向を読み取ってください
+- 料金設定や見積もり（回数・期間の見通し）で、見直したほうがよさそうな点を具体的に
+- 技工料・材料費の割合で気になるところ
+- 次から記録するとよい数字があれば
+
+■ 完了した症例
+${rows.join('\n')}`;
+}
+
+function bigCalcHTML(x) {
+  return `
+        <h2>収支</h2>
+        <div class="stats">
+          <div class="stat"><div class="v">${man1(x.revenue)}</div><div class="l">収入（契約＋保険）</div></div>
+          <div class="stat"><div class="v">${man1(x.cost)}</div><div class="l">経費（技工・材料・その他）</div></div>
+          <div class="stat"><div class="v">${man1(x.profit)}</div><div class="l">利益</div></div>
+          <div class="stat"><div class="v">${x.rate != null ? Math.round(x.rate * 100) + '%' : '-'}</div><div class="l">利益率</div></div>
+        </div>
+        <p class="small" style="margin:8px 0 0">${x.months != null ? `期間 ${x.months}か月` : ''}${x.monthDiff != null ? `（見通し${sign(x.monthDiff)}か月）` : ''}${x.visitDiff != null ? ` ・ 回数 見通し${sign(x.visitDiff)}回` : ''}${x.perHour != null ? ` ・ 1時間あたり${man1(x.perHour)}` : ''}</p>
+        <p class="muted" style="margin:4px 0 0">保険は点数×10円で計算。人件費や家賃などの固定費は含みません。</p>`;
+}
+
+function openBigCase(id) {
+  const existing = id ? S.bigcases.find((c) => c.id === id) : null;
+  const c = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), kind: '全顎矯正', status: 'contract', mark: '', contractOn: today(), visitDates: [] };
+  c.visitDates = c.visitDates || [];
+  const num = (k, label, unit, ph = '') => `<label class="field grow"><span>${label}（${unit}）</span><input type="number" inputmode="decimal" data-bg="${k}" value="${esc(c[k] ?? '')}" placeholder="${ph}"></label>`;
+  const draw = () => {
+    const x = bigCalc(c);
+    const sheet = openSheet(existing ? '大型症例' : '大型症例を追加', `
+      <h3>種類</h3>${choicesHTML('bgkind', BIG_KINDS.map((k) => [k, k]), c.kind)}
+      <h3>状態</h3>${choicesHTML('bgst', BIG_STATUS, c.status)}
+      <label class="field"><span>目印（名前は入れない）</span><input type="text" id="bg-mark" value="${esc(c.mark)}" placeholder="例：カルテ下2けた 36"></label>
+      <div class="card"><h2>金額</h2>
+        <div class="row">${num('offer', '提示金額', '万円')}${num('contract', '契約金額', '万円')}</div>
+        <div class="row">${num('insPoints', '算定できた保険点数', '点')}</div>
+        <div class="row">${num('lab', '技工料金', '万円')}${num('material', '材料費', '万円', 'インプラント体など')}</div>
+        <div class="row">${num('otherCost', 'その他の経費', '万円')}${num('chairHours', 'チェアタイムの合計', '時間', '任意')}</div>
+      </div>
+      <div class="card"><h2>見通しと実際</h2>
+        <div class="row">${num('planVisits', '見通しの回数', '回')}${num('planMonths', '見通しの期間', 'か月')}</div>
+        <div class="row">
+          <label class="field grow"><span>契約日</span><input type="date" data-bgd="contractOn" value="${esc(c.contractOn || '')}"></label>
+          <label class="field grow"><span>治療開始日</span><input type="date" data-bgd="start" value="${esc(c.start || '')}"></label>
+          <label class="field grow"><span>治療終了日</span><input type="date" data-bgd="end" value="${esc(c.end || '')}"></label>
+        </div>
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <span>実際の来院 <b>${c.visitDates.length || Number(c.visits) || 0}回</b>${c.visitDates.length ? ` <span class="muted small">（最後 ${jpDate(c.visitDates[c.visitDates.length - 1])}）</span>` : ''}</span>
+          <span class="row" style="gap:6px"><button type="button" class="btn sm" id="bg-plus">＋1（今日）</button><button type="button" class="btn ghost sm" id="bg-minus">−1</button></span>
+        </div>
+        ${!c.visitDates.length ? `<div class="row" style="margin-top:6px">${num('visits', 'まとめて入れる場合の回数', '回')}</div>` : ''}
+      </div>
+      <div class="card good" id="bg-calc">${bigCalcHTML(x)}
+      </div>
+      <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次の見積もりに生かすこと） ${voiceBtn('bg-rev')}</span><textarea id="bg-rev">${esc(c.review || '')}</textarea></label>
+      <div class="row"><button class="btn grow" id="bg-save">保存</button>${existing ? '<button class="btn ghost" id="bg-del">削除</button>' : ''}</div>`);
+    const sync = () => {
+      c.kind = picked(sheet, 'bgkind') || c.kind;
+      c.status = picked(sheet, 'bgst') || c.status;
+      c.mark = $('#bg-mark', sheet).value.trim();
+      $$('[data-bg]', sheet).forEach((i) => (c[i.dataset.bg] = i.value === '' ? '' : Number(i.value)));
+      $$('[data-bgd]', sheet).forEach((i) => (c[i.dataset.bgd] = i.value));
+      c.review = $('#bg-rev', sheet).value;
+      if (c.status === 'done' && c.start && !c.end) c.end = today();
+    };
+    const redraw = () => {
+      const top = $('.sheet').scrollTop;
+      draw();
+      $('.sheet').scrollTop = top;
+    };
+    bindChoices(sheet, 'bgkind', () => {});
+    bindChoices(sheet, 'bgst', () => {});
+    // 金額を入れたら、その場で収支を計算し直す
+    $$('[data-bg], [data-bgd]', sheet).forEach((i) => (i.oninput = () => (sync(), ($('#bg-calc', sheet).innerHTML = bigCalcHTML(bigCalc(c))))));
+    $('#bg-plus', sheet).onclick = () => {
+      sync();
+      if (!c.visitDates.length && Number(c.visits)) c.visitDates = Array(Number(c.visits)).fill(c.start || today());
+      c.visitDates.push(today());
+      if (!c.start) c.start = today();
+      if (c.status === 'contract') c.status = 'treat';
+      redraw();
+    };
+    $('#bg-minus', sheet).onclick = () => {
+      sync();
+      c.visitDates.pop();
+      redraw();
+    };
+    $('#bg-save', sheet).onclick = () => {
+      sync();
+      const i = S.bigcases.findIndex((y) => y.id === c.id);
+      if (i >= 0) S.bigcases[i] = c;
+      else S.bigcases.push(c);
+      save('bigcases');
+      closeSheet();
+      toast('保存しました');
+      render();
+    };
+    $('#bg-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この症例の記録を消しますか？')) return;
+      S.bigcases = S.bigcases.filter((y) => y.id !== c.id);
+      save('bigcases');
+      closeSheet();
+      render();
+    });
+  };
+  draw();
 }
 
 function openBizMonth(ym) {
