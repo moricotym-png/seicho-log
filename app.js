@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 56; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 57; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4480,6 +4480,7 @@ function renderBiz(v) {
     }
     ${bigCasesHTML()}`;
   $('#big-add', v).onclick = () => openBigCase(null);
+  $('#lab-names', v).onclick = openLabNames;
   $$('[data-big]', v).forEach((el) => (el.onclick = () => openBigCase(el.dataset.big)));
   $('#big-ask', v)?.addEventListener('click', async () => {
     try {
@@ -4529,6 +4530,192 @@ function renderBiz(v) {
 /* ---------- 大型症例の収支（50万円以上の自費） ---------- */
 // 患者さんの名前は入れない（目印はカルテ番号の下2けたなど）。金額は万円、期間は月。
 const BIG_KINDS = ['全顎矯正', 'インプラント', 'フルマウス', '歯周組織再生療法', 'その他'];
+/* ---------- フルマウス：段階ごとの予測と実際 ---------- */
+// 歯周基本治療 → 根管治療 → 外科 → プロビジョナル → 最終補綴 のように段階に分け、
+// 段階ごとに見通し（回数・期間）と実際を記録する。終わった段階から「予測比」を出し、次の見通しの目安にする。
+const PH_DEFAULT = ['歯周基本治療', '根管治療', '外科（歯周外科・インプラント）', 'プロビジョナル（咬合の確認）', '最終補綴'];
+const PH_CAUSES = ['歯周組織の反応待ち', '根管治療が難航', '咬合・顎位の調整が長引いた', '技工の遅れ・再製作', '来院間隔があいた・キャンセル', '治療計画の変更・追加', 'その他'];
+const phHas = (c) => (c.phases || []).some((m) => m.planVisits || m.planMonths || m.start || m.end || m.visits);
+const phMonths = (m) => (m.start && m.end ? monthsBetween(m.start, m.end) : null);
+const phLate = (m) => (Number(m.planMonths) && phMonths(m) > Number(m.planMonths)) || (Number(m.planVisits) && Number(m.visits) > Number(m.planVisits));
+function phaseRates() {
+  const out = {};
+  for (const c of S.bigcases)
+    for (const m of c.phases || []) {
+      const mo = phMonths(m);
+      if (mo == null || !m.name) continue;
+      const r = (out[m.name] = out[m.name] || { n: 0, mo: 0, ratios: [], vratios: [] });
+      r.n++;
+      r.mo += mo;
+      if (Number(m.planMonths)) r.ratios.push(mo / Number(m.planMonths));
+      if (Number(m.planVisits) && Number(m.visits)) r.vratios.push(Number(m.visits) / Number(m.planVisits));
+    }
+  return out;
+}
+const avgPct = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 100) + '%' : '-');
+function phaseHint(m) {
+  const bits = [];
+  const mo = phMonths(m);
+  if (mo != null) bits.push(`実際 ${mo}か月`);
+  if (mo != null && Number(m.planMonths)) bits.push(`見通しとの差 ${sign(Math.round((mo - Number(m.planMonths)) * 10) / 10)}か月`);
+  if (Number(m.visits) && Number(m.planVisits)) bits.push(`回数の差 ${sign(Number(m.visits) - Number(m.planVisits))}回`);
+  const r = phaseRates()[m.name];
+  if (r && r.n) bits.push(`これまで${r.n}件の平均 ${Math.round((r.mo / r.n) * 10) / 10}か月${r.ratios.length ? `（見通しの${avgPct(r.ratios)}）` : ''}`);
+  return bits.join(' ・ ') || '終わったら開始日と終了日を入れてください';
+}
+function phasesHTML(c) {
+  const list = c.phases || [];
+  const n = (i, k, v, w = 56) => `<input type="number" inputmode="decimal" class="num" style="width:${w}px" data-ph="${i}-${k}" value="${esc(v ?? '')}">`;
+  return `<div class="card"><h2>フルマウス：段階ごとの見通しと実際</h2>
+    <p class="muted" style="margin:0">段階の名前は書きかえられます。いらない段階は ✕ で消してください。</p>
+    ${list
+      .map(
+        (m, i) => `<div class="exercise">
+        <div class="row"><input type="text" data-ph="${i}-name" value="${esc(m.name || '')}" placeholder="段階の名前" class="grow"><button type="button" class="btn ghost sm" data-phdel="${i}">✕</button></div>
+        <div class="row small" style="margin-top:6px">見通し ${n(i, 'planVisits', m.planVisits)} 回 ${n(i, 'planMonths', m.planMonths)} か月 ・ 実際 ${n(i, 'visits', m.visits)} 回</div>
+        <div class="row small" style="margin-top:6px">
+          <label class="grow">開始日<input type="date" data-ph="${i}-start" value="${esc(m.start || '')}"></label>
+          <label class="grow">終了日<input type="date" data-ph="${i}-end" value="${esc(m.end || '')}"></label>
+        </div>
+        <p class="muted" style="margin:4px 0 0" data-phh="${i}">${esc(phaseHint(m))}</p>
+        <details style="margin-top:6px" ${phLate(m) || (m.causes || []).length ? 'open' : ''}><summary class="small">見通しより長くかかった原因${(m.causes || []).length ? `（${m.causes.length}）` : ''}</summary>
+          ${multiHTML('phc' + i, PH_CAUSES, m.causes || [])}
+          <input type="text" data-ph="${i}-why" value="${esc(m.why || '')}" placeholder="考察" style="margin-top:6px">
+        </details>
+      </div>`
+      )
+      .join('')}
+    <button type="button" class="btn sub sm" id="ph-add" style="margin-top:8px">＋ 段階を追加</button>
+  </div>`;
+}
+function phaseStatsHTML() {
+  const r = phaseRates();
+  const rows = Object.entries(r).filter(([, x]) => x.n);
+  if (!rows.length) return '';
+  const cnt = {};
+  for (const c of S.bigcases) for (const m of c.phases || []) for (const k of m.causes || []) cnt[k] = (cnt[k] || 0) + 1;
+  return `<h3>フルマウスの段階ごとの実績</h3><table class="biz-t"><tr><th>段階</th><th>件数</th><th>平均</th><th>期間の予測比</th><th>回数の予測比</th></tr>${rows
+    .map(([k, x]) => `<tr><td>${esc(k)}</td><td>${x.n}</td><td>${Math.round((x.mo / x.n) * 10) / 10}か月</td><td>${avgPct(x.ratios)}</td><td>${avgPct(x.vratios)}</td></tr>`)
+    .join('')}</table><p class="muted" style="margin:4px 0 8px">予測比＝実際 ÷ 見通し。100%より大きいと見通しより長くかかっています。</p>${
+    Object.keys(cnt).length
+      ? `<p class="small" style="margin:0 0 8px">長くかかった原因：${Object.entries(cnt).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(k)} ${n}`).join('、')}</p>`
+      : ''
+  }`;
+}
+
+/* ---------- 技工所：納期・料金・仕上がり ---------- */
+// 症例ごとに外注の技工を1件ずつ記録する。技工所ごとに、1本あたりの料金・日数・納期どおりの割合・仕上がりを比べる。
+const labNames = () => S.settings.labs || ['DDO', 'ベネテク'];
+const LO_ITEMS = ['ジルコニア', 'e.max', 'メタルボンド', '金属', 'インプラント上部構造', 'プロビジョナル', '義歯', 'その他'];
+const LO_QUALITY = [['3', '◎ そのまま'], ['2', '○ 少し調整'], ['1', '△ 調整に時間'], ['0', '× 再製作']];
+const loDays = (m) => (m.sent && m.back ? daysBetween(m.sent, m.back) : null);
+const loLate = (m) => (m.due && m.back ? daysBetween(m.due, m.back) : null);
+const loSum = (c) => (c.labOrders || []).reduce((a, m) => a + (Number(m.fee) || 0), 0);
+function labRates(filter = () => true) {
+  const out = {};
+  for (const c of S.bigcases)
+    for (const m of c.labOrders || []) {
+      if (!m.lab || !filter(m)) continue;
+      const r = (out[m.lab] = out[m.lab] || { n: 0, units: 0, fee: 0, days: [], late: [], q: [], remake: 0 });
+      r.n++;
+      const u = Number(m.units) || 1;
+      if (Number(m.fee)) {
+        r.units += u;
+        r.fee += Number(m.fee);
+      }
+      if (loDays(m) != null) r.days.push(loDays(m));
+      if (loLate(m) != null) r.late.push(loLate(m));
+      if (m.quality !== '' && m.quality != null) r.q.push(Number(m.quality));
+      if (m.quality === '0' || m.quality === 0) r.remake++;
+    }
+  return out;
+}
+const avg1 = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : null);
+function labHint(m) {
+  const bits = [];
+  if (loDays(m) != null) bits.push(`${loDays(m)}日で戻り`);
+  const l = loLate(m);
+  if (l != null) bits.push(l > 0 ? `納期より${l}日遅れ` : '納期どおり');
+  const r = labRates((x) => x.item === m.item)[m.lab];
+  if (r && r.units) bits.push(`${m.lab}の${m.item || ''}平均 1本${Math.round(r.fee / r.units).toLocaleString()}円${r.days.length ? `・${avg1(r.days)}日` : ''}`);
+  return bits.join(' ・ ') || '送った日・納期・戻った日を入れると、日数と遅れが出ます';
+}
+function labOrdersHTML(c) {
+  const list = c.labOrders || [];
+  const sel = (i, k, opts, v, ph) => `<select data-lo="${i}-${k}" class="grow"><option value="">${ph}</option>${opts.map((o) => (Array.isArray(o) ? o : [o, o])).map(([val, lab]) => `<option value="${esc(val)}" ${String(val) === String(v ?? '') ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>`;
+  const n = (i, k, v, w) => `<input type="number" inputmode="numeric" class="num" style="width:${w}px" data-lo="${i}-${k}" value="${esc(v ?? '')}">`;
+  const labs = [...new Set([...labNames(), ...list.map((m) => m.lab).filter(Boolean)])];
+  const sum = loSum(c);
+  return `<div class="card"><h2>外注の技工（技工所）</h2>
+    <p class="muted" style="margin:0">1回の依頼ごとに入れます。料金は円。上の「技工料金」が空欄なら、ここの合計を経費に使います。</p>
+    ${list
+      .map(
+        (m, i) => `<div class="exercise">
+        <div class="row">${sel(i, 'lab', labs, m.lab, '技工所')}${sel(i, 'item', LO_ITEMS, m.item, '種類')}<button type="button" class="btn ghost sm" data-lodel="${i}">✕</button></div>
+        <div class="row small" style="margin-top:6px"><input type="text" data-lo="${i}-site" value="${esc(m.site || '')}" placeholder="部位" style="width:90px"> ${n(i, 'units', m.units, 44)} 本 ・ 料金 ${n(i, 'fee', m.fee, 90)} 円</div>
+        <div class="row small" style="margin-top:6px">
+          <label class="grow">送った日<input type="date" data-lo="${i}-sent" value="${esc(m.sent || '')}"></label>
+          <label class="grow">納期<input type="date" data-lo="${i}-due" value="${esc(m.due || '')}"></label>
+          <label class="grow">戻った日<input type="date" data-lo="${i}-back" value="${esc(m.back || '')}"></label>
+        </div>
+        <div class="row small" style="margin-top:6px">仕上がり ${sel(i, 'quality', LO_QUALITY, m.quality, '-')}</div>
+        <input type="text" data-lo="${i}-note" value="${esc(m.note || '')}" placeholder="仕上がりのメモ（例：コンタクト弱い、色が明るい）" style="margin-top:6px">
+        <p class="muted" style="margin:4px 0 0" data-loh="${i}">${esc(labHint(m))}</p>
+      </div>`
+      )
+      .join('')}
+    <div class="row" style="margin-top:8px;justify-content:space-between;align-items:center"><button type="button" class="btn sub sm" id="lo-add">＋ 技工の依頼を追加</button>${sum ? `<span class="small" id="lo-sum">合計 ${sum.toLocaleString()}円</span>` : '<span class="small" id="lo-sum"></span>'}</div>
+  </div>`;
+}
+function labStatsHTML() {
+  const r = labRates();
+  const rows = Object.entries(r);
+  if (!rows.length) return '';
+  const qLabel = (a) => {
+    const v = avg1(a);
+    return v == null ? '-' : v >= 2.5 ? `◎ ${v}` : v >= 1.5 ? `○ ${v}` : v >= 0.5 ? `△ ${v}` : `× ${v}`;
+  };
+  return `<h3>技工所の比較</h3><table class="biz-t"><tr><th>技工所</th><th>件数</th><th>1本の料金</th><th>日数</th><th>納期どおり</th><th>仕上がり</th><th>再製作</th></tr>${rows
+    .map(
+      ([k, x]) =>
+        `<tr><td>${esc(k)}</td><td>${x.n}</td><td>${x.units ? Math.round(x.fee / x.units).toLocaleString() + '円' : '-'}</td><td>${avg1(x.days) ?? '-'}日</td><td>${x.late.length ? Math.round((x.late.filter((d) => d <= 0).length / x.late.length) * 100) + '%' : '-'}</td><td>${qLabel(x.q)}</td><td>${x.remake}</td></tr>`
+    )
+    .join('')}</table><p class="muted" style="margin:4px 0 8px">仕上がりは ◎3・○2・△1・×0 の平均。種類ごとの料金は、依頼の欄で技工所と種類を選ぶと出ます。</p>`;
+}
+function openLabNames() {
+  const draw = () => {
+    const sheet = openSheet('技工所の登録', `
+      <p class="muted">外注している技工所の名前です。消しても、前の記録はそのまま残ります。</p>
+      ${labNames().map((n, i) => `<div class="row" style="margin-bottom:6px"><input type="text" data-ln="${i}" value="${esc(n)}" class="grow"><button class="btn ghost sm" data-lndel="${i}">✕</button></div>`).join('')}
+      <div class="row"><input type="text" id="ln-new" placeholder="新しい技工所" class="grow"><button class="btn sub sm" id="ln-add">追加</button></div>
+      <button class="btn wide" id="ln-save" style="margin-top:12px">保存</button>`);
+    const read = () => $$('[data-ln]', sheet).map((i) => i.value.trim()).filter(Boolean);
+    $('#ln-add', sheet).onclick = () => {
+      const v = $('#ln-new', sheet).value.trim();
+      S.settings.labs = [...read(), ...(v ? [v] : [])];
+      draw();
+    };
+    $$('[data-lndel]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          const xs = read();
+          xs.splice(Number(b.dataset.lndel), 1);
+          S.settings.labs = xs;
+          draw();
+        })
+    );
+    $('#ln-save', sheet).onclick = () => {
+      const v = $('#ln-new', sheet).value.trim();
+      S.settings.labs = [...read(), ...(v ? [v] : [])];
+      save('settings');
+      closeSheet();
+      toast('保存しました');
+      render();
+    };
+  };
+  draw();
+}
+
 /* ---------- 歯周組織再生療法：術前と再評価 ---------- */
 // 部位ごとに、骨欠損の形態・術式と材料・術前と再評価のPD/CAL/骨欠損の深さを記録し、改善量を出す。
 const RG_DEFECT = ['1壁性', '2壁性', '3壁性', '複合型', '囲繞性', 'クレーター状', '水平性'];
@@ -4802,12 +4989,14 @@ const BIG_STATUS = [['contract', '契約済み'], ['treat', '治療中'], ['done
 const monthsBetween = (a, b) => (a && b ? Math.round((daysBetween(a, b) / 30.4) * 10) / 10 : null);
 function bigCalc(c) {
   const revenue = (Number(c.contract) || 0) + ((Number(c.insPoints) || 0) * 10) / 10000;
-  const cost = (Number(c.lab) || 0) + (Number(c.material) || 0) + (Number(c.otherCost) || 0);
+  const lab = c.lab !== '' && c.lab != null ? Number(c.lab) || 0 : loSum(c) / 10000;
+  const cost = lab + (Number(c.material) || 0) + (Number(c.otherCost) || 0);
   const profit = revenue - cost;
   const visits = c.visitDates?.length || Number(c.visits) || 0;
   const months = monthsBetween(c.start, c.end || (c.status === 'done' ? '' : c.start && today()));
   return {
     revenue,
+    lab,
     cost,
     profit,
     rate: revenue ? profit / revenue : null,
@@ -4853,7 +5042,10 @@ function bigCasesHTML() {
     ${moveStatsHTML()}
     ${implantStatsHTML()}
     ${regenStatsHTML()}
+    ${phaseStatsHTML()}
+    ${labStatsHTML()}
     <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
+    <button class="btn ghost wide" id="lab-names" style="margin-top:8px">技工所の登録（${esc(labNames().join('・'))}）</button>
     ${S.bigcases.some((c) => c.status === 'done') ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
   </div>`;
 }
@@ -4863,9 +5055,9 @@ function bigAskPrompt() {
     .filter((c) => c.status === 'done')
     .map((c) => {
       const x = bigCalc(c);
-      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 埋入トルク${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}${(c.regen || []).length ? `｜再生療法：${c.regen.map((m) => `${m.site || ''} ${m.defect || '欠損不明'}${m.furc && m.furc !== 'なし' ? `・分岐部${m.furc}` : ''} ${(m.mats || []).join('+') || '材料不明'} ${rgText(m)}${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}`;
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${Math.round(x.lab * 10) / 10}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 埋入トルク${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}${(c.phases || []).filter((m) => m.name && (m.planMonths || m.start)).length ? `｜段階：${c.phases.filter((m) => m.name && (m.planMonths || m.start)).map((m) => `${m.name} 見通し${m.planVisits || '-'}回/${m.planMonths || '-'}か月→実際${m.visits || '-'}回/${phMonths(m) ?? '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.labOrders || []).length ? `｜外注技工：${c.labOrders.map((m) => `${m.lab || '-'} ${m.item || ''}${m.units || 1}本 ${m.fee ? Number(m.fee).toLocaleString() + '円' : '-'} ${loDays(m) ?? '-'}日${loLate(m) > 0 ? `（${loLate(m)}日遅れ）` : ''} 仕上がり${LO_QUALITY.find((q) => q[0] === String(m.quality))?.[1] || '-'}${m.note ? `［${m.note}］` : ''}`).join('、')}` : ''}${(c.regen || []).length ? `｜再生療法：${c.regen.map((m) => `${m.site || ''} ${m.defect || '欠損不明'}${m.furc && m.furc !== 'なし' ? `・分岐部${m.furc}` : ''} ${(m.mats || []).join('+') || '材料不明'} ${rgText(m)}${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}`;
     });
-  return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
+  return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス・歯周組織再生療法）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
 
 ■ お願い
 - 種類ごとに、利益率と、見通しと実際の差（回数・期間）の傾向を読み取ってください
@@ -4875,6 +5067,8 @@ function bigAskPrompt() {
 - 予定どおり動かなかった原因（アンカー、メカニクス、干渉、コンプライアンス、局所因子など）の傾向と、次の症例で先回りしてできる対策
 - 歯周組織再生療法（欠損形態・材料ごとのPD減少・CAL獲得、改善しなかった原因）から、症例選択と術式選択で気をつけること
 - インプラント（術式・骨質・骨量・埋入トルク・ISQごとの、埋入から印象までの期間と予測との差）から、次の予測の立て方で気をつけること
+- フルマウスの段階ごと（歯周基本治療・根管治療・外科・プロビジョナル・最終補綴など）の見通しと実際の差、長くかかった原因から、次の見通しの立て方
+- 技工所ごとの料金・日数・納期の守り方・仕上がり・再製作の比較と、症例や補綴の種類ごとの使い分け
 - 次から記録するとよい数字があれば
 
 ■ 完了した症例
@@ -4919,6 +5113,7 @@ function openBigCase(id) {
   c.visitDates = c.visitDates || [];
   const num = (k, label, unit, ph = '') => `<label class="field grow"><span>${label}（${unit}）</span><input type="number" inputmode="decimal" data-bg="${k}" value="${esc(c[k] ?? '')}" placeholder="${ph}"></label>`;
   const draw = () => {
+    if (c.kind === 'フルマウス' && !(c.phases || []).length) c.phases = PH_DEFAULT.map((name) => ({ name }));
     const x = bigCalc(c);
     const sheet = openSheet(existing ? '大型症例' : '大型症例を追加', `
       <div class="card">
@@ -4932,7 +5127,7 @@ function openBigCase(id) {
       <div class="card"><h2>金額</h2>
         <div class="row">${num('offer', '提示金額', '万円')}${num('contract', '契約金額', '万円')}</div>
         <div class="row">${num('insPoints', '算定できた保険点数', '点')}</div>
-        <div class="row">${num('lab', '技工料金', '万円')}${num('material', '材料費', '万円', 'インプラント体など')}</div>
+        <div class="row">${num('lab', '技工料金', '万円', loSum(c) ? `空欄なら${Math.round(loSum(c) / 1000) / 10}` : '')}${num('material', '材料費', '万円', 'インプラント体など')}</div>
         <div class="row">${num('otherCost', 'その他の経費', '万円')}${num('chairHours', 'チェアタイムの合計', '時間', '任意')}</div>
       </div>
       <div class="card"><h2>見通しと実際</h2>
@@ -4951,6 +5146,8 @@ function openBigCase(id) {
       ${c.kind === '全顎矯正' || (c.moves || []).length ? movesHTML(c) : ''}
       ${c.kind === 'インプラント' || (c.implants || []).length ? implantsHTML(c) : ''}
       ${c.kind === '歯周組織再生療法' || (c.regen || []).length ? regenHTML(c) : ''}
+      ${c.kind === 'フルマウス' || phHas(c) ? phasesHTML(c) : ''}
+      ${labOrdersHTML(c)}
       <div class="card good" id="bg-calc">${bigCalcHTML(x)}
       </div>
       <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次の見積もりに生かすこと） ${voiceBtn('bg-rev')}</span><textarea id="bg-rev">${esc(c.review || '')}</textarea></label>
@@ -4963,6 +5160,21 @@ function openBigCase(id) {
       $$('[data-bgd]', sheet).forEach((i) => (c[i.dataset.bgd] = i.value));
       c.review = $('#bg-rev', sheet).value;
       c.appliance = picked(sheet, 'bgapp') || c.appliance || '';
+      c.phases = c.phases || [];
+      c.phases.forEach((m, i) => {
+        if ($(`[data-multi="phc${i}"]`, sheet)) m.causes = readMulti(sheet, 'phc' + i);
+      });
+      $$('[data-ph]', sheet).forEach((el) => {
+        const [i, k] = el.dataset.ph.split('-');
+        const m = c.phases[Number(i)];
+        if (m) m[k] = ['planVisits', 'planMonths', 'visits'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+      });
+      c.labOrders = c.labOrders || [];
+      $$('[data-lo]', sheet).forEach((el) => {
+        const [i, k] = el.dataset.lo.split('-');
+        const m = c.labOrders[Number(i)];
+        if (m) m[k] = ['units', 'fee'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+      });
       c.regen = c.regen || [];
       c.regen.forEach((m, i) => {
         if ($(`[data-multi="rgm${i}"]`, sheet)) m.mats = readMulti(sheet, 'rgm' + i);
@@ -5042,6 +5254,53 @@ function openBigCase(id) {
       });
     };
     $$('[data-mv]', sheet).forEach((el) => (el.oninput = refreshMoves));
+    const refreshPh = () => {
+      sync();
+      c.phases.forEach((m, i) => {
+        const h = $(`[data-phh="${i}"]`, sheet);
+        if (h) h.textContent = phaseHint(m);
+      });
+    };
+    $$('[data-ph]', sheet).forEach((el) => (el.oninput = refreshPh));
+    $('#ph-add', sheet)?.addEventListener('click', () => {
+      sync();
+      c.phases.push({ name: '' });
+      redraw();
+    });
+    $$('[data-phdel]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          sync();
+          c.phases.splice(Number(b.dataset.phdel), 1);
+          redraw();
+        })
+    );
+    const refreshLo = () => {
+      sync();
+      c.labOrders.forEach((m, i) => {
+        const h = $(`[data-loh="${i}"]`, sheet);
+        if (h) h.textContent = labHint(m);
+      });
+      const sum = loSum(c);
+      $('#lo-sum', sheet).textContent = sum ? `合計 ${sum.toLocaleString()}円` : '';
+      $('#bg-calc', sheet).innerHTML = bigCalcHTML(bigCalc(c));
+    };
+    $$('[data-lo]', sheet).forEach((el) => (el.oninput = el.tagName === 'SELECT' ? null : refreshLo));
+    $$('select[data-lo]', sheet).forEach((el) => (el.onchange = refreshLo));
+    $('#lo-add', sheet).onclick = () => {
+      sync();
+      const last = c.labOrders[c.labOrders.length - 1];
+      c.labOrders.push({ lab: last?.lab || labNames()[0] || '', item: last?.item || '', units: 1, sent: today() });
+      redraw();
+    };
+    $$('[data-lodel]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          sync();
+          c.labOrders.splice(Number(b.dataset.lodel), 1);
+          redraw();
+        })
+    );
     const refreshRg = () => {
       sync();
       (c.regen || []).forEach((m, i) => {
@@ -5102,8 +5361,8 @@ function openBigCase(id) {
     $('[data-choice="bgkind"]', sheet).addEventListener('click', () => setTimeout(() => {
       const k = picked(sheet, 'bgkind');
       // 全顎矯正なら歯の移動、インプラントならインプラントの欄を出す（入力済みのものは残す）
-      const want = { mv: k === '全顎矯正' || (c.moves || []).length > 0, im: k === 'インプラント' || (c.implants || []).length > 0, rg: k === '歯周組織再生療法' || (c.regen || []).length > 0 };
-      if (want.mv !== !!$('#mv-add', sheet) || want.im !== !!$('#im-add', sheet) || want.rg !== !!$('#rg-add', sheet)) {
+      const want = { mv: k === '全顎矯正' || (c.moves || []).length > 0, im: k === 'インプラント' || (c.implants || []).length > 0, rg: k === '歯周組織再生療法' || (c.regen || []).length > 0, ph: k === 'フルマウス' || phHas(c) };
+      if (want.mv !== !!$('#mv-add', sheet) || want.im !== !!$('#im-add', sheet) || want.rg !== !!$('#rg-add', sheet) || want.ph !== !!$('#ph-add', sheet)) {
         sync();
         redraw();
       }
@@ -5123,6 +5382,7 @@ function openBigCase(id) {
     };
     $('#bg-save', sheet).onclick = () => {
       sync();
+      if (c.kind !== 'フルマウス' && !phHas(c)) delete c.phases;
       const i = S.bigcases.findIndex((y) => y.id === c.id);
       if (i >= 0) S.bigcases[i] = c;
       else S.bigcases.push(c);
