@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 53; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 54; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4529,6 +4529,85 @@ function renderBiz(v) {
 /* ---------- 大型症例の収支（50万円以上の自費） ---------- */
 // 患者さんの名前は入れない（目印はカルテ番号の下2けたなど）。金額は万円、期間は月。
 const BIG_KINDS = ['全顎矯正', 'インプラント', 'フルマウス', 'その他'];
+/* ---------- インプラント：骨の状態・術式ごとの期間の予測と実際 ---------- */
+// 1本ごとに、骨質・骨量・術式・初期固定・ISQ と、「埋入から印象まで」の予測と実際を記録する。
+// 終わったものから、術式ごと（骨質別も）の平均期間と予測比を出し、次の予測の目安にする。
+const IMP_METHODS = ['通常埋入（遅延）', '抜歯即時', '早期埋入', 'GBR同時', 'GBR段階', 'サイナス（ラテラル）', 'サイナス（クレスタル）', 'ソケットプリザベーション後'];
+const IMP_QUALITY = ['1', '2', '3', '4'];
+const IMP_VOLUME = ['A', 'B', 'C', 'D', 'E'];
+const impActual = (m) => (m.placeDate && m.impDate ? monthsBetween(m.placeDate, m.impDate) : Number(m.actualMonths) || null);
+function implantRates() {
+  const out = {};
+  for (const c of S.bigcases)
+    for (const m of c.implants || []) {
+      const mo = impActual(m);
+      if (!mo || !m.method) continue;
+      for (const key of [m.method, `${m.method}|${m.quality || ''}`]) {
+        out[key] = out[key] || { mo: 0, n: 0, ratios: [], isq: [] };
+        out[key].mo += mo;
+        out[key].n++;
+        if (Number(m.planMonths)) out[key].ratios.push(mo / Number(m.planMonths));
+        if (Number(m.isq2)) out[key].isq.push(Number(m.isq2));
+      }
+    }
+  return out;
+}
+function implantHint(m) {
+  const r = implantRates();
+  const own = r[`${m.method}|${m.quality || ''}`];
+  const base = own && own.n ? own : r[m.method];
+  const bits = [];
+  if (base && base.n) {
+    bits.push(`これまで${base.n}本の平均 ${Math.round((base.mo / base.n) * 10) / 10}か月${own && own.n ? `（骨質${m.quality}）` : ''}`);
+    if (base.ratios.length) bits.push(`予測に対して実際は平均${Math.round((base.ratios.reduce((a, b) => a + b, 0) / base.ratios.length) * 100)}%`);
+    if (base.isq.length) bits.push(`印象前のISQ平均 ${Math.round(base.isq.reduce((a, b) => a + b, 0) / base.isq.length)}`);
+  } else bits.push('まだこの術式の記録がありません。印象日まで入れると、次から目安が出ます');
+  const act = impActual(m);
+  if (act != null) bits.push(`この1本：埋入から印象まで ${act}か月`);
+  if (act != null && Number(m.planMonths)) {
+    const d = Math.round((act - Number(m.planMonths)) * 10) / 10;
+    bits.push(`予測との差 ${d > 0 ? '＋' : ''}${d}か月`);
+  }
+  return bits.join(' ・ ');
+}
+function implantsHTML(c) {
+  const list = c.implants || [];
+  const sel = (i, k, opts, v, ph) => `<select data-im="${i}-${k}" class="grow"><option value="">${ph}</option>${opts.map((o) => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+  const num = (i, k, v, ph, w = 64) => `<input type="number" inputmode="decimal" class="num" style="width:${w}px" data-im="${i}-${k}" value="${esc(v ?? '')}" placeholder="${ph}">`;
+  return `<div class="card"><h2>インプラント：予測と実際</h2>
+    <p class="muted" style="margin:0">1本ずつ入れます。終わったら印象日を入れてください（埋入日から自動で期間を出します）。</p>
+    ${list
+      .map(
+        (m, i) => `<div class="exercise">
+        <div class="row"><input type="text" data-im="${i}-site" value="${esc(m.site || '')}" placeholder="部位（例：#36）" class="grow"><button type="button" class="btn ghost sm" data-imdel="${i}">✕</button></div>
+        <div class="row" style="margin-top:6px">${sel(i, 'method', IMP_METHODS, m.method, '術式')}</div>
+        <div class="row small" style="margin-top:6px">骨質 ${sel(i, 'quality', IMP_QUALITY, m.quality, '-')} 骨量 ${sel(i, 'volume', IMP_VOLUME, m.volume, '-')}</div>
+        <div class="row small" style="margin-top:6px">初期固定 ${num(i, 'torque', m.torque, 'Ncm')} Ncm ・ ISQ 埋入時 ${num(i, 'isq1', m.isq1, '')} 印象前 ${num(i, 'isq2', m.isq2, '')}</div>
+        <div class="row small" style="margin-top:6px">予測：埋入から印象まで ${num(i, 'planMonths', m.planMonths, 'か月')} か月</div>
+        <div class="row small" style="margin-top:6px">
+          <label class="grow">埋入日<input type="date" data-im="${i}-placeDate" value="${esc(m.placeDate || '')}"></label>
+          <label class="grow">印象日<input type="date" data-im="${i}-impDate" value="${esc(m.impDate || '')}"></label>
+        </div>
+        <p class="muted" style="margin:4px 0 0" data-imh="${i}">${esc(implantHint(m))}</p>
+      </div>`
+      )
+      .join('')}
+    <button type="button" class="btn sub sm" id="im-add" style="margin-top:8px">＋ インプラントを追加</button>
+  </div>`;
+}
+function implantStatsHTML() {
+  const r = implantRates();
+  const rows = IMP_METHODS.map((t) => [t, r[t]]).filter((x) => x[1]?.n);
+  if (!rows.length) return '';
+  return `<h3>インプラントの実績（埋入から印象まで）</h3><table class="biz-t"><tr><th>術式</th><th>本数</th><th>平均</th><th>予測比</th><th>ISQ</th></tr>${rows
+    .map(([t, x]) => {
+      const ratio = x.ratios.length ? Math.round((x.ratios.reduce((a, b) => a + b, 0) / x.ratios.length) * 100) + '%' : '-';
+      const isq = x.isq.length ? Math.round(x.isq.reduce((a, b) => a + b, 0) / x.isq.length) : '-';
+      return `<tr><td>${t}</td><td>${x.n}</td><td>${Math.round((x.mo / x.n) * 10) / 10}か月</td><td>${ratio}</td><td>${isq}</td></tr>`;
+    })
+    .join('')}</table><p class="muted" style="margin:4px 0 8px">予測比＝実際の期間 ÷ 予測の期間。ISQは印象前の平均です。</p>`;
+}
+
 /* ---------- 矯正の移動量：予測と実際 ---------- */
 // 1つの症例に、歯の動き（例：上顎大臼歯の遠心移動 3mm）を並べ、予測の期間と実際の期間を記録する。
 // 終わった動きから「1か月あたりの移動量」を出し、次の予測の目安にする。
@@ -4675,6 +4754,7 @@ function bigCasesHTML() {
       })
       .join('')}
     ${moveStatsHTML()}
+    ${implantStatsHTML()}
     <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
     ${done.length ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
   </div>`;
@@ -4685,7 +4765,7 @@ function bigAskPrompt() {
     .filter((c) => c.status === 'done')
     .map((c) => {
       const x = bigCalc(c);
-      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月`).join('、')}` : ''}`;
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 初期固定${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}`;
     });
   return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
 
@@ -4694,6 +4774,7 @@ function bigAskPrompt() {
 - 料金設定や見積もり（回数・期間の見通し）で、見直したほうがよさそうな点を具体的に
 - 技工料・材料費の割合で気になるところ
 - 矯正の歯の移動（種類ごとの1か月あたりの速さ、予測と実際の差）から、次の予測の立て方で気をつけること
+- インプラント（術式・骨質・骨量・初期固定・ISQごとの、埋入から印象までの期間と予測との差）から、次の予測の立て方で気をつけること
 - 次から記録するとよい数字があれば
 
 ■ 完了した症例
@@ -4768,6 +4849,7 @@ function openBigCase(id) {
         ${!c.visitDates.length ? `<div class="row" style="margin-top:6px">${num('visits', 'まとめて入れる場合の回数', '回')}</div>` : ''}
       </div>
       ${c.kind === '全顎矯正' || (c.moves || []).length ? movesHTML(c) : ''}
+      ${c.kind === 'インプラント' || (c.implants || []).length ? implantsHTML(c) : ''}
       <div class="card good" id="bg-calc">${bigCalcHTML(x)}
       </div>
       <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次の見積もりに生かすこと） ${voiceBtn('bg-rev')}</span><textarea id="bg-rev">${esc(c.review || '')}</textarea></label>
@@ -4780,6 +4862,13 @@ function openBigCase(id) {
       $$('[data-bgd]', sheet).forEach((i) => (c[i.dataset.bgd] = i.value));
       c.review = $('#bg-rev', sheet).value;
       c.appliance = picked(sheet, 'bgapp') || c.appliance || '';
+      c.implants = c.implants || [];
+      $$('[data-im]', sheet).forEach((el) => {
+        const [i, k] = el.dataset.im.split('-');
+        const m = c.implants[Number(i)];
+        if (!m) return;
+        m[k] = ['torque', 'isq1', 'isq2', 'planMonths'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+      });
       c.moves = c.moves || [];
       $$('[data-mv]', sheet).forEach((el) => {
         const [i, k] = el.dataset.mv.split('-');
@@ -4838,6 +4927,27 @@ function openBigCase(id) {
       });
     };
     $$('[data-mv]', sheet).forEach((el) => (el.oninput = refreshMoves));
+    const refreshImps = () => {
+      sync();
+      (c.implants || []).forEach((m, i) => {
+        const h = $(`[data-imh="${i}"]`, sheet);
+        if (h) h.textContent = implantHint(m);
+      });
+    };
+    $$('[data-im]', sheet).forEach((el) => (el.oninput = refreshImps));
+    $('#im-add', sheet)?.addEventListener('click', () => {
+      sync();
+      c.implants.push({ site: '', method: '', planMonths: '', placeDate: '' });
+      redraw();
+    });
+    $$('[data-imdel]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          sync();
+          c.implants.splice(Number(b.dataset.imdel), 1);
+          redraw();
+        })
+    );
     bindChoices(sheet, 'bgapp', refreshMoves);
     $('#mv-add', sheet)?.addEventListener('click', () => {
       sync();
@@ -4854,12 +4964,12 @@ function openBigCase(id) {
     );
     // 種類を全顎矯正にしたら、移動量の欄を出す
     $('[data-choice="bgkind"]', sheet).addEventListener('click', () => setTimeout(() => {
-      const ortho = picked(sheet, 'bgkind') === '全顎矯正';
-      const shown = !!$('#mv-add', sheet);
-      // 全顎矯正にしたら出し、ほかの種類にしたら（動きを入れていなければ）隠す
-      if (ortho !== shown) {
+      const k = picked(sheet, 'bgkind');
+      // 全顎矯正なら歯の移動、インプラントならインプラントの欄を出す（入力済みのものは残す）
+      const want = { mv: k === '全顎矯正' || (c.moves || []).length > 0, im: k === 'インプラント' || (c.implants || []).length > 0 };
+      if (want.mv !== !!$('#mv-add', sheet) || want.im !== !!$('#im-add', sheet)) {
         sync();
-        if (ortho || !(c.moves || []).length) redraw();
+        redraw();
       }
     }));
     $('#bg-plus', sheet).onclick = () => {
