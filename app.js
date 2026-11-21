@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION = 49; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 50; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'biz', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -84,6 +84,7 @@ const DEFAULTS = {
   chores: [],
   papers: [],
   blog: [],
+  biz: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
@@ -2580,7 +2581,7 @@ function openTreatmentMenu() {
 /* ========== 仕事（相談・院内技工） ========== */
 let workTab = 'consult';
 function renderWork(v) {
-  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['papers', '文献'], ['blog', 'ブログ'], ['chores', '雑務']], workTab)}</div><div id="work-body"></div>`;
+  v.innerHTML = `<div class="subtabs">${choicesHTML('work', [['consult', '相談'], ['lab', '院内技工'], ['clinic', '臨床ノート'], ['papers', '文献'], ['blog', 'ブログ'], ['chores', '雑務'], ['biz', '経営']], workTab)}</div><div id="work-body"></div>`;
   bindChoices(v, 'work', (x) => {
     workTab = x || workTab;
     render();
@@ -2591,6 +2592,7 @@ function renderWork(v) {
   else if (workTab === 'chores') renderChores(body);
   else if (workTab === 'papers') renderPapers(body);
   else if (workTab === 'blog') renderBlog(body);
+  else if (workTab === 'biz') renderBiz(body);
   else renderConsult(body);
 }
 
@@ -4291,6 +4293,255 @@ function openPaper(id, parentId = null) {
     });
   };
   draw();
+}
+
+/* ========== 経営（レセコンの月計・年計から） ========== */
+// 月ごとの数字を記録する。保険診療の収入は「合計点数×10円」で見積もる（レセコンの「保険入金額」は窓口で受け取った一部負担金だけのため）。
+const BIZ_FIELDS = [
+  ['patients', '合計人数', '人'],
+  ['newPts', '新患人数', '人'],
+  ['reFirst', '再初診人数', '人'],
+  ['billed', '会計人数', '人'],
+  ['points', '合計点数', '点'],
+  ['visits', '実日数（延べ来院）', '日'],
+  ['insPts', '保険人数', '人'],
+  ['insPaid', '保険入金額（窓口負担）', '円'],
+  ['insUnpaid', '保険未収金', '円'],
+  ['selfPts', '自費人数', '人'],
+  ['selfPaid', '自費入金額', '円'],
+  ['selfUnpaid', '自費未収金', '円'],
+  ['otherPts', 'その他人数', '人'],
+  ['otherPaid', 'その他入金額', '円'],
+  ['totalPaid', '合計入金額', '円'],
+];
+const BIZ_KEYS = BIZ_FIELDS.map((f) => f[0]);
+const yenS = (n) => `${Math.round(n).toLocaleString()}円`;
+const manY = (n) => `${(Math.round(n / 1000) / 10).toLocaleString()}万円`;
+let bizYear = null;
+
+// 1か月の見積もり
+function bizCalc(r) {
+  const ins = (Number(r.points) || 0) * 10;
+  const self = Number(r.selfPaid) || 0;
+  const other = Number(r.otherPaid) || 0;
+  const total = ins + self + other;
+  return {
+    ins,
+    self,
+    other,
+    total,
+    selfRate: total ? self / total : 0,
+    perVisit: r.visits ? (Number(r.points) || 0) / r.visits : 0,
+    selfPer: r.selfPts ? self / r.selfPts : 0,
+  };
+}
+const bizSorted = () => [...S.biz].sort((a, b) => (a.ym < b.ym ? -1 : 1));
+
+const BIZ_PROMPT = `この写真は、歯科医院のレセコン（レセプトコンピューター）の「年計表（月単位）」または「月計表」の画面です。月ごとの数字を読み取って、次の形のJSONだけを \`\`\`json のコードブロック1つで出してください。
+・年月は西暦の "YYYY-MM"（令和8年＝2026年）
+・数字はカンマを取った数値。空欄は 0
+・月計表（日単位）の写真のときは、いちばん下の「総合計」の行を、その月の数字として1か月分だけ出す。集計期間の終わりの日を "until"（YYYY-MM-DD）に入れる
+・患者さんの氏名は、絶対に出力しない
+{"months":[{"ym":"","until":"","patients":0,"newPts":0,"reFirst":0,"billed":0,"points":0,"totalPaid":0,"visits":0,"insPts":0,"insPaid":0,"insUnpaid":0,"selfPts":0,"selfPaid":0,"selfUnpaid":0,"otherPts":0,"otherPaid":0}]}
+（月計表の項目との対応：初診人数→patients ではなく新患・初診は newPts、会計人数→billed、合計点数→points、一部負担金→insPaid、自費金額→selfPaid、その他金額→otherPaid、入金額→totalPaid、未収金→insUnpaid）`;
+
+function parseBizReply(text) {
+  const block = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = block ? block[1] : text;
+  const a = body.indexOf('{');
+  const b = body.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error('nojson');
+  const d = JSON.parse(body.slice(a, b + 1));
+  const list = Array.isArray(d.months) ? d.months : Array.isArray(d) ? d : [d];
+  return list
+    .filter((m) => /^\d{4}-\d{2}$/.test(String(m.ym || '')))
+    .map((m) => {
+      const r = { ym: m.ym, until: /^\d{4}-\d{2}-\d{2}$/.test(m.until || '') ? m.until : '' };
+      BIZ_KEYS.forEach((k) => (r[k] = Number(String(m[k] ?? 0).replace(/[,，円人点日]/g, '')) || 0));
+      return r;
+    });
+}
+function mergeBiz(list) {
+  for (const r of list) {
+    const i = S.biz.findIndex((x) => x.ym === r.ym);
+    if (i >= 0) S.biz[i] = { ...S.biz[i], ...r };
+    else S.biz.push(r);
+  }
+  save('biz');
+}
+
+function bizAnalysisPrompt() {
+  const rows = bizSorted().map((r) => {
+    const c = bizCalc(r);
+    return `${r.ym}${r.until ? `（${r.until.slice(8)}日まで）` : ''}｜推定医業収入${manY(c.total)}（保険${manY(c.ins)}・自費${manY(c.self)}・その他${manY(c.other)}）｜自費率${Math.round(c.selfRate * 100)}%｜新患${r.newPts}人・再初診${r.reFirst}人｜会計${r.billed}人｜延べ来院${r.visits}｜1来院${Math.round(c.perVisit)}点｜自費${r.selfPts}人（1人あたり${manY(c.selfPer)}）｜保険未収${yenS(r.insUnpaid)}`;
+  });
+  return `歯科医院の院長です。経営の数字を見て、分析とアドバイスをください。保険診療より自費診療（審美補綴、インプラント、矯正、フルマウスなど）に力を入れたいと考えています。コンサルテーションはすべて院長が行っています。
+
+■ お願い
+- まず、数字から読み取れる傾向を3〜5つ（良い点・気になる点）
+- 次に、すぐできる打ち手を3つ（具体的に。数字で効果を確かめる方法も）
+- 足りないデータがあれば「次から記録するとよい数字」を挙げる
+- 保険の収入は「合計点数×10円」で見積もっています。自費はレセコンに入れ始めた月より前は0になっています
+- 断定しすぎず、月の途中の数字は途中であることを考えに入れてください
+
+■ 月ごとの数字
+${rows.join('\n')}`;
+}
+
+function renderBiz(v) {
+  const all = bizSorted();
+  const years = [...new Set(all.map((r) => r.ym.slice(0, 4)))];
+  const yr = bizYear || years[years.length - 1] || today().slice(0, 4);
+  const rows = all.filter((r) => r.ym.startsWith(yr));
+  const sum = (f) => rows.reduce((a, r) => a + f(r), 0);
+  const tot = { ins: sum((r) => bizCalc(r).ins), self: sum((r) => bizCalc(r).self), other: sum((r) => bizCalc(r).other) };
+  tot.total = tot.ins + tot.self + tot.other;
+  const selfRows = rows.filter((r) => r.selfPaid > 1000); // 少額の入力ミスは除く
+  const last = rows[rows.length - 1];
+  const prev = last ? all[all.indexOf(last) - 1] : null;
+  const lc = last && bizCalc(last);
+  const pc = prev && bizCalc(prev);
+  const diff = (a, b) => (b ? `${a >= b ? '＋' : '−'}${manY(Math.abs(a - b))}` : '');
+  const max = Math.max(1, ...rows.map((r) => bizCalc(r).total));
+  const C = { ins: '#2a78d6', self: '#1baf7a', other: '#eda100' };
+
+  v.innerHTML = `
+    <div class="card">
+      <h2>経営 <span class="small">${yr}年</span></h2>
+      ${
+        rows.length
+          ? `<div class="stats">
+        <div class="stat"><div class="v">${manY(tot.total)}</div><div class="l">推定医業収入（${rows.length}か月）</div></div>
+        <div class="stat"><div class="v">${(() => {
+          // 自費をレセコンに入れ始めた月からの自費率（それより前は自費が0のため）
+          const since = rows.filter((r) => r.ym >= (selfRows[0]?.ym || '9999'));
+          const t2 = since.reduce((a, r) => a + bizCalc(r).total, 0);
+          return t2 ? Math.round((since.reduce((a, r) => a + bizCalc(r).self, 0) / t2) * 100) : 0;
+        })()}%</div><div class="l">自費率${selfRows.length ? `（${Number(selfRows[0].ym.slice(5))}月から）` : ''}</div></div>
+        <div class="stat"><div class="v">${manY(tot.self)}</div><div class="l">自費の合計${selfRows.length ? `（月平均${manY(tot.self / selfRows.length)}）` : ''}</div></div>
+        <div class="stat"><div class="v">${sum((r) => r.newPts)}人</div><div class="l">新患（月平均${Math.round(sum((r) => r.newPts) / rows.length)}人）</div></div>
+      </div>
+      <p class="muted" style="margin:8px 0 0">推定医業収入＝合計点数×10円（保険）＋自費＋その他。レセコンの「保険入金額」は窓口の一部負担金だけなので使っていません。</p>`
+          : '<p class="muted">まだ数字が入っていません。下の「写真から取り込む」か「月を追加」から入れてください。</p>'
+      }
+      ${years.length > 1 ? `<div style="margin-top:8px">${choicesHTML('bizyr', years.map((y) => [y, `${y}年`]), yr)}</div>` : ''}
+    </div>
+    ${
+      last
+        ? `<div class="card"><h2>${Number(last.ym.slice(5))}月${last.until ? `（${Number(last.until.slice(8))}日まで）` : ''}</h2>
+      <div class="stats">
+        <div class="stat"><div class="v">${manY(lc.total)}</div><div class="l">推定医業収入 ${diff(lc.total, pc?.total)}</div></div>
+        <div class="stat"><div class="v">${manY(lc.self)}</div><div class="l">自費 ${diff(lc.self, pc?.self)}</div></div>
+        <div class="stat"><div class="v">${manY(lc.ins)}</div><div class="l">保険（点数×10）${diff(lc.ins, pc?.ins)}</div></div>
+        <div class="stat"><div class="v">${last.newPts}人</div><div class="l">新患${prev ? `（前月${prev.newPts}人）` : ''}</div></div>
+        <div class="stat"><div class="v">${Math.round(lc.perVisit).toLocaleString()}点</div><div class="l">1来院あたりの点数</div></div>
+        <div class="stat"><div class="v">${last.selfPts ? manY(lc.selfPer) : '-'}</div><div class="l">自費1人あたり</div></div>
+      </div>${last.until ? '<p class="muted" style="margin:8px 0 0">月の途中の数字です。前月との差は参考にしてください。</p>' : ''}</div>`
+        : ''
+    }
+    ${
+      rows.length
+        ? `<div class="card"><h2>月ごとの推定医業収入</h2>
+      <div class="sbars">${rows
+        .map((r) => {
+          const c = bizCalc(r);
+          const h = (n) => `${(n / max) * 140}px`;
+          return `<div class="sbar" data-bizm="${r.ym}"><span class="n">${Math.round(c.total / 10000).toLocaleString()}</span>
+            <i style="height:${h(c.other)};background:${C.other}"></i><i style="height:${h(c.self)};background:${C.self}"></i><i style="height:${h(c.ins)};background:${C.ins}"></i>
+            <span class="d">${Number(r.ym.slice(5))}月${r.until ? '*' : ''}</span></div>`;
+        })
+        .join('')}</div>
+      <div class="row small" style="gap:12px;margin-top:6px"><span><i class="lg" style="background:${C.ins}"></i>保険（点数×10）</span><span><i class="lg" style="background:${C.self}"></i>自費</span><span><i class="lg" style="background:${C.other}"></i>その他</span></div>
+      <p class="muted" style="margin:4px 0 0">棒の上の数字は万円。＊は月の途中。棒を押すとその月の数字を直せます。</p>
+      <table class="biz-t">
+        <tr><th>月</th><th>収入</th><th>自費</th><th>自費率</th><th>新患</th><th>1来院</th></tr>
+        ${rows
+          .map((r) => {
+            const c = bizCalc(r);
+            return `<tr data-bizm="${r.ym}"><td>${Number(r.ym.slice(5))}月${r.until ? '*' : ''}</td><td>${manY(c.total)}</td><td>${manY(c.self)}</td><td>${Math.round(c.selfRate * 100)}%</td><td>${r.newPts}</td><td>${Math.round(c.perVisit)}点</td></tr>`;
+          })
+          .join('')}
+      </table></div>`
+        : ''
+    }
+    <div class="card">
+      <h2>数字を入れる</h2>
+      <p class="muted" style="margin:0 0 8px">年計表や月計表の画面を撮って、Claudeのアプリで読み取ってもらいます（患者さんの名前が写らないように撮るか、写っても読み取らないよう頼んであります）。</p>
+      <div class="row"><button class="btn sub grow" id="biz-copy">① 頼む文章をコピー</button><button class="btn grow" id="biz-paste">② 貼り付けて取り込む</button></div>
+      <button class="btn ghost wide" id="biz-add" style="margin-top:8px">＋ 月を手で追加・修正</button>
+    </div>
+    ${
+      all.length
+        ? `<div class="card"><h2>分析とアドバイス</h2>
+      <p class="muted" style="margin:0 0 8px">入っている数字をまとめた頼む文章をコピーします。Claudeのアプリに貼ると、傾向の読み取りと打ち手の提案が返ってきます。</p>
+      <button class="btn wide" id="biz-ask">Claudeに分析を頼む文章をコピー</button></div>`
+        : ''
+    }`;
+  bindChoices(v, 'bizyr', (x) => {
+    bizYear = x || yr;
+    render();
+  });
+  $$('[data-bizm]', v).forEach((el) => (el.onclick = () => openBizMonth(el.dataset.bizm)));
+  $('#biz-add', v).onclick = () => openBizMonth(null);
+  const copy = async (text, msg) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(msg, 4000);
+    } catch {
+      const sheet = openSheet('頼む文章', `<p class="small">下の文章を長押しして「すべて選択」→「コピー」してください。</p><textarea style="min-height:300px">${esc(text)}</textarea>`);
+      $('textarea', sheet).select();
+    }
+  };
+  $('#biz-copy', v).onclick = () => copy(BIZ_PROMPT, 'コピーしました。Claudeのアプリに写真と一緒に貼り付けてください');
+  $('#biz-ask', v)?.addEventListener('click', () => copy(bizAnalysisPrompt(), 'コピーしました。Claudeのアプリに貼り付けて送ってください'));
+  $('#biz-paste', v).onclick = async () => {
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      text = prompt('Claudeの返事を貼り付けてください') || '';
+    }
+    try {
+      const list = parseBizReply(text);
+      if (!list.length) throw new Error('empty');
+      mergeBiz(list);
+      toast(`${list.length}か月分を取り込みました`, 3500);
+      bizYear = list[list.length - 1].ym.slice(0, 4);
+      render();
+    } catch {
+      toast('数字の部分が見つかりませんでした。返事の最後のコード欄をコピーしてください', 5000);
+    }
+  };
+}
+
+function openBizMonth(ym) {
+  const existing = ym ? S.biz.find((r) => r.ym === ym) : null;
+  const r = existing ? { ...existing } : { ym: today().slice(0, 7), until: '' };
+  const sheet = openSheet(existing ? `${Number(r.ym.slice(5))}月の数字` : '月を追加', `
+    <div class="row">
+      <label class="field grow"><span>年月</span><input type="month" id="bz-ym" value="${r.ym}"></label>
+      <label class="field grow"><span>月の途中なら、集計の最終日</span><input type="date" id="bz-until" value="${esc(r.until || '')}"></label>
+    </div>
+    ${BIZ_FIELDS.map(([k, l, u]) => `<label class="field"><span>${l}（${u}）</span><input type="number" inputmode="numeric" data-bz="${k}" value="${esc(r[k] ?? '')}"></label>`).join('')}
+    <div class="row"><button class="btn grow" id="bz-save">保存</button>${existing ? '<button class="btn ghost" id="bz-del">削除</button>' : ''}</div>`);
+  $('#bz-save', sheet).onclick = () => {
+    const nym = $('#bz-ym', sheet).value;
+    if (!/^\d{4}-\d{2}$/.test(nym)) return toast('年月を入れてください');
+    const rec = { ym: nym, until: $('#bz-until', sheet).value };
+    $$('[data-bz]', sheet).forEach((i) => (rec[i.dataset.bz] = Number(i.value) || 0));
+    if (existing && nym !== existing.ym) S.biz = S.biz.filter((x) => x.ym !== existing.ym);
+    mergeBiz([rec]);
+    closeSheet();
+    toast('保存しました');
+    render();
+  };
+  $('#bz-del', sheet)?.addEventListener('click', () => {
+    if (!confirm('この月の数字を消しますか？')) return;
+    S.biz = S.biz.filter((x) => x.ym !== existing.ym);
+    save('biz');
+    closeSheet();
+    render();
+  });
 }
 
 /* ========== ブログ（ネタ帳から投稿まで） ========== */

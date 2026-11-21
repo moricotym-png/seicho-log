@@ -198,3 +198,15 @@ select.rpe { width: auto; padding: 6px 8px; font-size: 14px; }
 
 .ptag-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: none; border: 0; padding: 2px 0 4px; font: inherit; color: inherit; text-align: left; }
 .ptag-row .pt { font-size: 12px; }
+
+.sbars { display: flex; gap: 4px; align-items: flex-end; height: 180px; overflow-x: auto; padding-top: 4px; }
+.sbar { flex: 1 0 24px; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; height: 100%; cursor: pointer; }
+.sbar i { display: block; width: 100%; }
+.sbar i:first-of-type { border-radius: 4px 4px 0 0; }
+.sbar .n { font-size: 10px; text-align: center; color: var(--ink); }
+.sbar .d { font-size: 10px; text-align: center; color: var(--muted); margin-top: 2px; }
+.lg { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.biz-t { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; font-variant-numeric: tabular-nums; }
+.biz-t th { color: var(--muted); font-weight: 400; text-align: right; padding: 4px 2px; }
+.biz-t td { text-align: right; padding: 5px 2px; border-top: 1px solid var(--line); }
+.biz-t th:first-child, .biz-t td:first-child { text-align: left; }
