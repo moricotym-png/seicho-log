@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 54; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 55; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4624,6 +4624,10 @@ const MOVE_TYPES = [
   ['その他', 'mm'],
 ];
 const APPLIANCES = ['ワイヤー', 'マウスピース'];
+// 予定どおり動かなかったときの原因
+const MOVE_CAUSES = ['アンカーの不足', 'メカニクスの不備', '干渉（咬合・隣接歯など）', 'コンプライアンス不足（顎間ゴム・装着時間）', '失活歯などの局所因子', '骨の状態（皮質骨・骨密度）', 'その他'];
+// 予定より時間がかかった、または予定の量まで動かなかった
+const moveShort = (m) => (Number(m.planMonths) && Number(m.actualMonths) > Number(m.planMonths)) || (Number(m.plan) && m.actual !== '' && m.actual != null && Number(m.actual) < Number(m.plan));
 const moveUnit = (t) => MOVE_TYPES.find((x) => x[0] === t)?.[1] || 'mm';
 // 終わった動きの記録から、種類（と装置）ごとの平均速度
 function moveRates() {
@@ -4683,6 +4687,10 @@ function movesHTML(c) {
         <div class="row small" style="margin-top:4px">実際 <input type="number" inputmode="decimal" class="num" data-mv="${i}-actual" value="${esc(m.actual ?? '')}" placeholder="量"> <span data-mvu="${i}">${moveUnit(m.type)}</span> を
           <input type="number" inputmode="decimal" class="num" data-mv="${i}-actualMonths" value="${esc(m.actualMonths ?? '')}" placeholder="期間"> か月</div>
         <p class="muted" style="margin:4px 0 0" data-mvh="${i}">${esc(moveHint(m, c.appliance))}</p>
+        <details style="margin-top:6px" ${moveShort(m) || (m.causes || []).length ? 'open' : ''}><summary class="small">予定どおり動かなかった原因${(m.causes || []).length ? `（${m.causes.length}）` : ''}</summary>
+          ${multiHTML('mvc' + i, MOVE_CAUSES, m.causes || [])}
+          <input type="text" data-mv="${i}-why" value="${esc(m.why || '')}" placeholder="考察（例：上顎のアンカーが弱く、前歯が前に出た）" style="margin-top:6px">
+        </details>
       </div>`
       )
       .join('')}
@@ -4698,7 +4706,14 @@ function moveStatsHTML() {
       const avg = x.ratios.length ? Math.round((x.ratios.reduce((a, b) => a + b, 0) / x.ratios.length) * 100) + '%' : '-';
       return `<tr><td>${t}</td><td>${x.n}</td><td>${Math.round((x.amt / x.mo) * 100) / 100}${u}/月</td><td>${avg}</td></tr>`;
     })
-    .join('')}</table><p class="muted" style="margin:4px 0 8px">予測比＝実際の期間 ÷ 予測の期間。100%より大きいと、予測より時間がかかっています。</p>`;
+    .join('')}</table><p class="muted" style="margin:4px 0 8px">予測比＝実際の期間 ÷ 予測の期間。100%より大きいと、予測より時間がかかっています。</p>${moveCausesHTML()}`;
+}
+function moveCausesHTML() {
+  const cnt = {};
+  for (const c of S.bigcases) for (const m of c.moves || []) for (const k of m.causes || []) cnt[k] = (cnt[k] || 0) + 1;
+  const rows = Object.entries(cnt).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) return '';
+  return `<h3>予定どおり動かなかった原因（多い順）</h3>${rows.map(([k, n]) => `<div class="row small" style="justify-content:space-between;padding:2px 0"><span>${esc(k)}</span><b>${n}件</b></div>`).join('')}`;
 }
 
 const BIG_STATUS = [['contract', '契約済み'], ['treat', '治療中'], ['done', '完了']];
@@ -4756,7 +4771,7 @@ function bigCasesHTML() {
     ${moveStatsHTML()}
     ${implantStatsHTML()}
     <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
-    ${done.length ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
+    ${S.bigcases.some((c) => c.status === 'done') ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
   </div>`;
 }
 
@@ -4765,7 +4780,7 @@ function bigAskPrompt() {
     .filter((c) => c.status === 'done')
     .map((c) => {
       const x = bigCalc(c);
-      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 初期固定${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}`;
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 初期固定${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}`;
     });
   return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
 
@@ -4774,6 +4789,7 @@ function bigAskPrompt() {
 - 料金設定や見積もり（回数・期間の見通し）で、見直したほうがよさそうな点を具体的に
 - 技工料・材料費の割合で気になるところ
 - 矯正の歯の移動（種類ごとの1か月あたりの速さ、予測と実際の差）から、次の予測の立て方で気をつけること
+- 予定どおり動かなかった原因（アンカー、メカニクス、干渉、コンプライアンス、局所因子など）の傾向と、次の症例で先回りしてできる対策
 - インプラント（術式・骨質・骨量・初期固定・ISQごとの、埋入から印象までの期間と予測との差）から、次の予測の立て方で気をつけること
 - 次から記録するとよい数字があれば
 
@@ -4870,6 +4886,9 @@ function openBigCase(id) {
         m[k] = ['torque', 'isq1', 'isq2', 'planMonths'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
       });
       c.moves = c.moves || [];
+      c.moves.forEach((m, i) => {
+        if ($(`[data-multi="mvc${i}"]`, sheet)) m.causes = readMulti(sheet, 'mvc' + i);
+      });
       $$('[data-mv]', sheet).forEach((el) => {
         const [i, k] = el.dataset.mv.split('-');
         const m = c.moves[Number(i)];
