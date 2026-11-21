@@ -1,11 +1,11 @@
 'use strict';
-const APP_VERSION = 57; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 58; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
 /* ---------- 保存（IndexedDB） ---------- */
 const DB_NAME = 'seicho-log';
-const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'biz', 'bigcases', 'secret', 'settings'];
+const KEYS = ['days', 'drinks', 'workouts', 'cardio', 'body', 'books', 'readLogs', 'engLogs', 'words', 'readQs', 'consults', 'treatments', 'labs', 'labTypes', 'cases', 'notes', 'noteCats', 'chores', 'papers', 'blog', 'biz', 'bigcases', 'labOrders', 'secret', 'settings'];
 let db;
 const S = {};
 
@@ -86,6 +86,7 @@ const DEFAULTS = {
   blog: [],
   biz: [],
   bigcases: [],
+  labOrders: [],
   noteCats: ['破折器具の除去', 'スクリュー破折・緩み', 'ブラケット・装置の脱離', '補綴物の破損・脱離', '外科のトラブル', '材料・器具', '患者さんへの説明', 'その他'],
   secret: null,
   settings: { lastBackup: null, clinicDays: [1, 2, 3, 4, 5, 6] },
@@ -4478,9 +4479,24 @@ function renderBiz(v) {
       <button class="btn wide" id="biz-ask">Claudeに分析を頼む文章をコピー</button></div>`
         : ''
     }
+    ${labWeekHTML()}
     ${bigCasesHTML()}`;
   $('#big-add', v).onclick = () => openBigCase(null);
   $('#lab-names', v).onclick = openLabNames;
+  $('#lo-new', v).onclick = () => openLabOrder(null);
+  $$('[data-lo-open]', v).forEach((el) => (el.onclick = () => openLabOrder(el.dataset.loOpen)));
+  $('#lw-more', v)?.addEventListener('click', () => {
+    labWeeks = Math.min(52, labWeeks + 8);
+    render();
+  });
+  $('#lo-ask', v)?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(labAskPrompt());
+      toast('コピーしました。Claudeのアプリに貼り付けて送ってください', 4000);
+    } catch {
+      toast('自動でコピーできませんでした', 3000);
+    }
+  });
   $$('[data-big]', v).forEach((el) => (el.onclick = () => openBigCase(el.dataset.big)));
   $('#big-ask', v)?.addEventListener('click', async () => {
     try {
@@ -4603,43 +4619,46 @@ function phaseStatsHTML() {
   }`;
 }
 
-/* ---------- 技工所：納期・料金・仕上がり ---------- */
-// 症例ごとに外注の技工を1件ずつ記録する。技工所ごとに、1本あたりの料金・日数・納期どおりの割合・仕上がりを比べる。
+/* ---------- 外注技工：入った本数・料金・仕上がり ---------- */
+// 1件 = 入った日・技工所・種類・本数・1本の料金・仕上がり。大型症例の中の依頼も合わせて数える。
+// 週ごとのセラミックの本数と内訳、技工所×種類ごとの「料金と仕上がりのバランス」を出す。
 const labNames = () => S.settings.labs || ['DDO', 'ベネテク'];
-const LO_ITEMS = ['ジルコニア', 'e.max', 'メタルボンド', '金属', 'インプラント上部構造', 'プロビジョナル', '義歯', 'その他'];
+const LO_ITEMS = ['ジルコニア', 'e.max', 'セラミックインレー', 'ラミネートベニア', 'メタルボンド', 'インプラント上部構造', 'その他（金属・義歯など）'];
+const LO_CERAMIC = (item) => item && !item.startsWith('その他');
 const LO_QUALITY = [['3', '◎ そのまま'], ['2', '○ 少し調整'], ['1', '△ 調整に時間'], ['0', '× 再製作']];
-const loDays = (m) => (m.sent && m.back ? daysBetween(m.sent, m.back) : null);
-const loLate = (m) => (m.due && m.back ? daysBetween(m.due, m.back) : null);
-const loSum = (c) => (c.labOrders || []).reduce((a, m) => a + (Number(m.fee) || 0), 0);
-function labRates(filter = () => true) {
+const loUnit = (m) => (m.unitFee !== '' && m.unitFee != null ? Number(m.unitFee) || 0 : m.fee ? Number(m.fee) / (Number(m.units) || 1) : 0);
+const loTotal = (m) => loUnit(m) * (Number(m.units) || 1);
+const loSum = (c) => (c.labOrders || []).reduce((a, m) => a + loTotal(m), 0);
+const loDate = (m) => m.date || m.back || m.sent || '';
+const allLabOrders = () => [...S.labOrders, ...S.bigcases.flatMap((c) => (c.labOrders || []).map((m) => ({ ...m, caseMark: `${c.kind}${c.mark ? ' ' + c.mark : ''}` })))];
+const qMark = (v) => (v == null ? '-' : v >= 2.5 ? '◎' : v >= 1.5 ? '○' : v >= 0.5 ? '△' : '×');
+function labRates(key = (m) => m.lab) {
   const out = {};
-  for (const c of S.bigcases)
-    for (const m of c.labOrders || []) {
-      if (!m.lab || !filter(m)) continue;
-      const r = (out[m.lab] = out[m.lab] || { n: 0, units: 0, fee: 0, days: [], late: [], q: [], remake: 0 });
-      r.n++;
-      const u = Number(m.units) || 1;
-      if (Number(m.fee)) {
-        r.units += u;
-        r.fee += Number(m.fee);
-      }
-      if (loDays(m) != null) r.days.push(loDays(m));
-      if (loLate(m) != null) r.late.push(loLate(m));
-      if (m.quality !== '' && m.quality != null) r.q.push(Number(m.quality));
-      if (m.quality === '0' || m.quality === 0) r.remake++;
+  for (const m of allLabOrders()) {
+    if (!m.lab) continue;
+    const k = key(m);
+    const r = (out[k] = out[k] || { n: 0, units: 0, fee: 0, feeUnits: 0, q: [], remake: 0 });
+    const u = Number(m.units) || 1;
+    r.n++;
+    r.units += u;
+    if (loUnit(m)) {
+      r.fee += loTotal(m);
+      r.feeUnits += u;
     }
+    if (m.quality !== '' && m.quality != null) for (let i = 0; i < u; i++) r.q.push(Number(m.quality));
+    if (String(m.quality) === '0') r.remake += u;
+  }
   return out;
 }
 const avg1 = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : null);
 function labHint(m) {
-  const bits = [];
-  if (loDays(m) != null) bits.push(`${loDays(m)}日で戻り`);
-  const l = loLate(m);
-  if (l != null) bits.push(l > 0 ? `納期より${l}日遅れ` : '納期どおり');
-  const r = labRates((x) => x.item === m.item)[m.lab];
-  if (r && r.units) bits.push(`${m.lab}の${m.item || ''}平均 1本${Math.round(r.fee / r.units).toLocaleString()}円${r.days.length ? `・${avg1(r.days)}日` : ''}`);
-  return bits.join(' ・ ') || '送った日・納期・戻った日を入れると、日数と遅れが出ます';
+  if (!m.lab || !m.item) return '';
+  const r = labRates((x) => `${x.lab}|${x.item}`)[`${m.lab}|${m.item}`];
+  if (!r || !r.n) return '';
+  const q = avg1(r.q);
+  return `${m.lab}の${m.item}：これまで${r.units}本・1本平均${r.feeUnits ? Math.round(r.fee / r.feeUnits).toLocaleString() + '円' : '-'}・仕上がり${qMark(q)}${q != null ? ` ${q}` : ''}`;
 }
+// 大型症例の中の依頼（入った日・種類・本数・1本の料金・仕上がり）
 function labOrdersHTML(c) {
   const list = c.labOrders || [];
   const sel = (i, k, opts, v, ph) => `<select data-lo="${i}-${k}" class="grow"><option value="">${ph}</option>${opts.map((o) => (Array.isArray(o) ? o : [o, o])).map(([val, lab]) => `<option value="${esc(val)}" ${String(val) === String(v ?? '') ? 'selected' : ''}>${esc(lab)}</option>`).join('')}</select>`;
@@ -4647,40 +4666,151 @@ function labOrdersHTML(c) {
   const labs = [...new Set([...labNames(), ...list.map((m) => m.lab).filter(Boolean)])];
   const sum = loSum(c);
   return `<div class="card"><h2>外注の技工（技工所）</h2>
-    <p class="muted" style="margin:0">1回の依頼ごとに入れます。料金は円。上の「技工料金」が空欄なら、ここの合計を経費に使います。</p>
+    <p class="muted" style="margin:0">上の「技工料金」が空欄なら、ここの合計を経費に使います。週ごとの本数にも入ります。</p>
     ${list
       .map(
         (m, i) => `<div class="exercise">
         <div class="row">${sel(i, 'lab', labs, m.lab, '技工所')}${sel(i, 'item', LO_ITEMS, m.item, '種類')}<button type="button" class="btn ghost sm" data-lodel="${i}">✕</button></div>
-        <div class="row small" style="margin-top:6px"><input type="text" data-lo="${i}-site" value="${esc(m.site || '')}" placeholder="部位" style="width:90px"> ${n(i, 'units', m.units, 44)} 本 ・ 料金 ${n(i, 'fee', m.fee, 90)} 円</div>
-        <div class="row small" style="margin-top:6px">
-          <label class="grow">送った日<input type="date" data-lo="${i}-sent" value="${esc(m.sent || '')}"></label>
-          <label class="grow">納期<input type="date" data-lo="${i}-due" value="${esc(m.due || '')}"></label>
-          <label class="grow">戻った日<input type="date" data-lo="${i}-back" value="${esc(m.back || '')}"></label>
-        </div>
-        <div class="row small" style="margin-top:6px">仕上がり ${sel(i, 'quality', LO_QUALITY, m.quality, '-')}</div>
+        <div class="row small" style="margin-top:6px"><input type="text" data-lo="${i}-site" value="${esc(m.site || '')}" placeholder="部位" style="width:80px"> ${n(i, 'units', m.units, 44)} 本 ・ 1本 ${n(i, 'unitFee', m.unitFee ?? (m.fee ? Math.round(loUnit(m)) : ''), 80)} 円</div>
+        <div class="row small" style="margin-top:6px"><label class="grow">入った日<input type="date" data-lo="${i}-date" value="${esc(loDate(m))}"></label><label class="grow">仕上がり${sel(i, 'quality', LO_QUALITY, m.quality, '-')}</label></div>
         <input type="text" data-lo="${i}-note" value="${esc(m.note || '')}" placeholder="仕上がりのメモ（例：コンタクト弱い、色が明るい）" style="margin-top:6px">
         <p class="muted" style="margin:4px 0 0" data-loh="${i}">${esc(labHint(m))}</p>
       </div>`
       )
       .join('')}
-    <div class="row" style="margin-top:8px;justify-content:space-between;align-items:center"><button type="button" class="btn sub sm" id="lo-add">＋ 技工の依頼を追加</button>${sum ? `<span class="small" id="lo-sum">合計 ${sum.toLocaleString()}円</span>` : '<span class="small" id="lo-sum"></span>'}</div>
+    <div class="row" style="margin-top:8px;justify-content:space-between;align-items:center"><button type="button" class="btn sub sm" id="lo-add">＋ 技工の依頼を追加</button><span class="small" id="lo-sum">${sum ? `合計 ${Math.round(sum).toLocaleString()}円` : ''}</span></div>
   </div>`;
 }
-function labStatsHTML() {
-  const r = labRates();
-  const rows = Object.entries(r);
-  if (!rows.length) return '';
-  const qLabel = (a) => {
-    const v = avg1(a);
-    return v == null ? '-' : v >= 2.5 ? `◎ ${v}` : v >= 1.5 ? `○ ${v}` : v >= 0.5 ? `△ ${v}` : `× ${v}`;
+let labWeeks = 8;
+function labWeekHTML() {
+  const all = allLabOrders().filter((m) => loDate(m));
+  const thisWeek = weekStart(today());
+  const weeks = Array.from({ length: labWeeks }, (_, i) => addDays(thisWeek, -7 * i));
+  const rowOf = (ws) => {
+    const xs = all.filter((m) => weekStart(loDate(m)) === ws);
+    const cer = xs.filter((m) => LO_CERAMIC(m.item));
+    const by = {};
+    for (const m of cer) by[m.item] = (by[m.item] || 0) + (Number(m.units) || 1);
+    const labBy = {};
+    for (const m of cer) labBy[m.lab || '-'] = (labBy[m.lab || '-'] || 0) + (Number(m.units) || 1);
+    return { ws, n: Object.values(by).reduce((a, b) => a + b, 0), by, labBy, fee: xs.reduce((a, m) => a + loTotal(m), 0) };
   };
-  return `<h3>技工所の比較</h3><table class="biz-t"><tr><th>技工所</th><th>件数</th><th>1本の料金</th><th>日数</th><th>納期どおり</th><th>仕上がり</th><th>再製作</th></tr>${rows
-    .map(
-      ([k, x]) =>
-        `<tr><td>${esc(k)}</td><td>${x.n}</td><td>${x.units ? Math.round(x.fee / x.units).toLocaleString() + '円' : '-'}</td><td>${avg1(x.days) ?? '-'}日</td><td>${x.late.length ? Math.round((x.late.filter((d) => d <= 0).length / x.late.length) * 100) + '%' : '-'}</td><td>${qLabel(x.q)}</td><td>${x.remake}</td></tr>`
-    )
-    .join('')}</table><p class="muted" style="margin:4px 0 8px">仕上がりは ◎3・○2・△1・×0 の平均。種類ごとの料金は、依頼の欄で技工所と種類を選ぶと出ます。</p>`;
+  const rows = weeks.map(rowOf);
+  const max = Math.max(1, ...rows.map((r) => r.n));
+  const ym = monthKey(today());
+  const monthN = all.filter((m) => monthKey(loDate(m)) === ym && LO_CERAMIC(m.item)).reduce((a, m) => a + (Number(m.units) || 1), 0);
+  const md = (d) => `${parseYmd(d).getMonth() + 1}/${parseYmd(d).getDate()}`;
+  // 料金と仕上がりのバランス：技工所×種類
+  const r = labRates((m) => `${m.lab}|${m.item || '-'}`);
+  const cmp = Object.entries(r).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const recent = [...S.labOrders].sort((a, b) => (loDate(a) < loDate(b) ? 1 : -1)).slice(0, 8);
+  return `<div class="card">
+    <h2>外注技工（セラミック） <span class="small">今月 ${monthN}本</span></h2>
+    <p class="muted" style="margin:0 0 8px">入った日で週ごと（月曜はじまり）に数えます。大型症例の中で入れた分も含みます。</p>
+    ${rows
+      .map(
+        (x) => `<div style="margin-bottom:8px"><div class="row small" style="justify-content:space-between"><span>${x.ws === thisWeek ? '今週' : md(x.ws) + '〜'}</span><b>${x.n}本</b></div>
+        <div class="dbars"><div class="dbar" style="width:${Math.round((x.n / max) * 100)}%"></div></div>
+        ${x.n ? `<div class="muted small">${Object.entries(x.by).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(k)} ${n}`).join('・')}　／　${Object.entries(x.labBy).map(([k, n]) => `${esc(k)} ${n}`).join('・')}${x.fee ? `　技工料 ${Math.round(x.fee / 1000) / 10}万円` : ''}</div>` : ''}</div>`
+      )
+      .join('')}
+    ${labWeeks < 52 ? '<button class="btn ghost sm" id="lw-more">もっと前の週も見る</button>' : ''}
+    ${
+      cmp.length
+        ? `<h3>料金と仕上がりのバランス</h3><table class="biz-t"><tr><th>技工所・種類</th><th>本数</th><th>1本の料金</th><th>仕上がり</th><th>再製作</th></tr>${cmp
+            .map(([k, x]) => {
+              const [lab, item] = k.split('|');
+              const q = avg1(x.q);
+              return `<tr><td>${esc(lab)}<br><span class="muted">${esc(item)}</span></td><td>${x.units}</td><td>${x.feeUnits ? Math.round(x.fee / x.feeUnits).toLocaleString() + '円' : '-'}</td><td>${qMark(q)}${q != null ? ` ${q}` : ''}</td><td>${x.remake}</td></tr>`;
+            })
+            .join('')}</table><p class="muted" style="margin:4px 0 8px">仕上がりは ◎3・○2・△1・×0 の1本あたりの平均。同じ種類で技工所を比べると、料金の差に見合う仕上がりかが分かります。</p>`
+        : ''
+    }
+    ${recent.length ? `<h3>最近入れた記録</h3>${recent.map((m) => `<div class="list-item" data-lo-open="${m.id}"><div class="row" style="justify-content:space-between"><b>${esc(m.item || '')} ${Number(m.units) || 1}本</b><span class="small">${jpDate(loDate(m))}</span></div><div class="meta">${esc(m.lab || '')}${loUnit(m) ? ` ・ 1本${Math.round(loUnit(m)).toLocaleString()}円` : ''}${m.quality !== '' && m.quality != null ? ` ・ ${esc(LO_QUALITY.find((q) => q[0] === String(m.quality))?.[1] || '')}` : ''}${m.note ? ` ・ ${esc(m.note)}` : ''}</div></div>`).join('')}` : ''}
+    <button class="btn sub wide" id="lo-new" style="margin-top:8px">＋ 入った技工物を記録</button>
+    <div class="row" style="margin-top:8px"><button class="btn ghost grow" id="lab-names">技工所の登録</button>${cmp.length ? '<button class="btn ghost grow" id="lo-ask">Claudeに比較を頼む</button>' : ''}</div>
+  </div>`;
+}
+function labAskPrompt() {
+  const r = labRates((m) => `${m.lab}|${m.item || '-'}`);
+  const rows = Object.entries(r).map(([k, x]) => {
+    const [lab, item] = k.split('|');
+    return `${lab}｜${item}｜${x.units}本｜1本平均${x.feeUnits ? Math.round(x.fee / x.feeUnits).toLocaleString() + '円' : '-'}｜仕上がり平均${avg1(x.q) ?? '-'}（◎3・○2・△1・×0）｜再製作${x.remake}本`;
+  });
+  const notes = allLabOrders().filter((m) => m.note).map((m) => `${m.lab}・${m.item}：${m.note}`);
+  return `歯科医院の院長です。外注している技工所ごとに、技工料金と仕上がりのバランスを比べたいです。患者さんの情報は含めていません。
+
+■ お願い
+- 種類ごとに、料金の差に見合った仕上がりの差があるか
+- どの種類をどの技工所に出すとよいか（使い分けの案）
+- 仕上がりのメモから見える、各技工所に伝えるとよい改善点
+- 比較のために、次から記録するとよいこと
+
+■ 技工所×種類の集計
+${rows.join('\n')}
+${notes.length ? `\n■ 仕上がりのメモ\n${notes.join('\n')}` : ''}`;
+}
+function openLabOrder(id) {
+  const existing = id ? S.labOrders.find((m) => m.id === id) : null;
+  const last = [...S.labOrders].sort((a, b) => (a.created < b.created ? 1 : -1))[0];
+  let m = existing ? structuredClone(existing) : { id: uid(), created: Date.now(), date: today(), lab: last?.lab || labNames()[0] || '', item: last?.item || 'ジルコニア', units: 1, unitFee: last?.unitFee ?? '' };
+  const draw = () => {
+    const labs = [...new Set([...labNames(), m.lab].filter(Boolean))];
+    const sheet = openSheet(existing ? '入った技工物' : '入った技工物を記録', `
+      <label class="field"><span>入った日</span><input type="date" id="lo-date" value="${esc(m.date || today())}"></label>
+      <h3>技工所</h3>${choicesHTML('lolab', labs.map((x) => [x, x]), m.lab)}
+      <h3>種類</h3>${choicesHTML('loitem', LO_ITEMS.map((x) => [x, x]), m.item)}
+      <div class="row">
+        <label class="field grow"><span>本数</span><input type="number" inputmode="numeric" id="lo-units" value="${esc(m.units ?? 1)}"></label>
+        <label class="field grow"><span>1本の技工料（円）</span><input type="number" inputmode="numeric" id="lo-fee" value="${esc(m.unitFee ?? '')}"></label>
+      </div>
+      <label class="field"><span>部位・目印（任意）</span><input type="text" id="lo-site" value="${esc(m.site || '')}" placeholder="例：#16、カルテ下2けた"></label>
+      <h3>仕上がり</h3>${choicesHTML('loq', LO_QUALITY, m.quality != null && m.quality !== '' ? String(m.quality) : null)}
+      <label class="field"><span>仕上がりのメモ</span><input type="text" id="lo-note" value="${esc(m.note || '')}" placeholder="例：コンタクト弱い、色が明るい、適合よし"></label>
+      <p class="muted" id="lo-hint">${esc(labHint(m))}</p>
+      <div class="row"><button class="btn grow" id="lo-save">保存</button>${existing ? '<button class="btn ghost" id="lo-del">削除</button>' : '<button class="btn sub" id="lo-next">保存して続けて</button>'}</div>`);
+    const sync = () => {
+      m.date = $('#lo-date', sheet).value || today();
+      m.lab = picked(sheet, 'lolab') || '';
+      m.item = picked(sheet, 'loitem') || '';
+      m.units = Number($('#lo-units', sheet).value) || 1;
+      m.unitFee = $('#lo-fee', sheet).value === '' ? '' : Number($('#lo-fee', sheet).value);
+      m.site = $('#lo-site', sheet).value.trim();
+      m.quality = picked(sheet, 'loq') ?? '';
+      m.note = $('#lo-note', sheet).value.trim();
+    };
+    const hint = () => (sync(), ($('#lo-hint', sheet).textContent = labHint(m)));
+    bindChoices(sheet, 'lolab', hint);
+    bindChoices(sheet, 'loitem', hint);
+    bindChoices(sheet, 'loq', () => {});
+    const store = () => {
+      sync();
+      const i = S.labOrders.findIndex((y) => y.id === m.id);
+      if (i >= 0) S.labOrders[i] = m;
+      else S.labOrders.push(m);
+      save('labOrders');
+    };
+    $('#lo-save', sheet).onclick = () => {
+      store();
+      closeSheet();
+      toast('保存しました');
+      render();
+    };
+    $('#lo-next', sheet)?.addEventListener('click', () => {
+      store();
+      toast(`${m.item} ${m.units}本を保存しました`);
+      m = { id: uid(), created: Date.now(), date: m.date, lab: m.lab, item: m.item, units: 1, unitFee: m.unitFee };
+      draw();
+    });
+    $('#lo-del', sheet)?.addEventListener('click', () => {
+      if (!confirm('この記録を消しますか？')) return;
+      S.labOrders = S.labOrders.filter((y) => y.id !== m.id);
+      save('labOrders');
+      closeSheet();
+      render();
+    });
+  };
+  draw();
 }
 function openLabNames() {
   const draw = () => {
@@ -5043,9 +5173,7 @@ function bigCasesHTML() {
     ${implantStatsHTML()}
     ${regenStatsHTML()}
     ${phaseStatsHTML()}
-    ${labStatsHTML()}
     <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
-    <button class="btn ghost wide" id="lab-names" style="margin-top:8px">技工所の登録（${esc(labNames().join('・'))}）</button>
     ${S.bigcases.some((c) => c.status === 'done') ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
   </div>`;
 }
@@ -5055,7 +5183,7 @@ function bigAskPrompt() {
     .filter((c) => c.status === 'done')
     .map((c) => {
       const x = bigCalc(c);
-      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${Math.round(x.lab * 10) / 10}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 埋入トルク${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}${(c.phases || []).filter((m) => m.name && (m.planMonths || m.start)).length ? `｜段階：${c.phases.filter((m) => m.name && (m.planMonths || m.start)).map((m) => `${m.name} 見通し${m.planVisits || '-'}回/${m.planMonths || '-'}か月→実際${m.visits || '-'}回/${phMonths(m) ?? '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.labOrders || []).length ? `｜外注技工：${c.labOrders.map((m) => `${m.lab || '-'} ${m.item || ''}${m.units || 1}本 ${m.fee ? Number(m.fee).toLocaleString() + '円' : '-'} ${loDays(m) ?? '-'}日${loLate(m) > 0 ? `（${loLate(m)}日遅れ）` : ''} 仕上がり${LO_QUALITY.find((q) => q[0] === String(m.quality))?.[1] || '-'}${m.note ? `［${m.note}］` : ''}`).join('、')}` : ''}${(c.regen || []).length ? `｜再生療法：${c.regen.map((m) => `${m.site || ''} ${m.defect || '欠損不明'}${m.furc && m.furc !== 'なし' ? `・分岐部${m.furc}` : ''} ${(m.mats || []).join('+') || '材料不明'} ${rgText(m)}${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}`;
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${Math.round(x.lab * 10) / 10}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 埋入トルク${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}${(c.phases || []).filter((m) => m.name && (m.planMonths || m.start)).length ? `｜段階：${c.phases.filter((m) => m.name && (m.planMonths || m.start)).map((m) => `${m.name} 見通し${m.planVisits || '-'}回/${m.planMonths || '-'}か月→実際${m.visits || '-'}回/${phMonths(m) ?? '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.labOrders || []).length ? `｜外注技工：${c.labOrders.map((m) => `${m.lab || '-'} ${m.item || ''}${m.units || 1}本 1本${loUnit(m) ? Math.round(loUnit(m)).toLocaleString() + '円' : '-'} 仕上がり${LO_QUALITY.find((q) => q[0] === String(m.quality))?.[1] || '-'}${m.note ? `［${m.note}］` : ''}`).join('、')}` : ''}${(c.regen || []).length ? `｜再生療法：${c.regen.map((m) => `${m.site || ''} ${m.defect || '欠損不明'}${m.furc && m.furc !== 'なし' ? `・分岐部${m.furc}` : ''} ${(m.mats || []).join('+') || '材料不明'} ${rgText(m)}${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}`;
     });
   return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス・歯周組織再生療法）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
 
@@ -5068,7 +5196,7 @@ function bigAskPrompt() {
 - 歯周組織再生療法（欠損形態・材料ごとのPD減少・CAL獲得、改善しなかった原因）から、症例選択と術式選択で気をつけること
 - インプラント（術式・骨質・骨量・埋入トルク・ISQごとの、埋入から印象までの期間と予測との差）から、次の予測の立て方で気をつけること
 - フルマウスの段階ごと（歯周基本治療・根管治療・外科・プロビジョナル・最終補綴など）の見通しと実際の差、長くかかった原因から、次の見通しの立て方
-- 技工所ごとの料金・日数・納期の守り方・仕上がり・再製作の比較と、症例や補綴の種類ごとの使い分け
+- 技工所ごとの料金と仕上がり・再製作のバランスと、症例や補綴の種類ごとの使い分け
 - 次から記録するとよい数字があれば
 
 ■ 完了した症例
@@ -5173,7 +5301,9 @@ function openBigCase(id) {
       $$('[data-lo]', sheet).forEach((el) => {
         const [i, k] = el.dataset.lo.split('-');
         const m = c.labOrders[Number(i)];
-        if (m) m[k] = ['units', 'fee'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+        if (!m) return;
+        m[k] = ['units', 'unitFee'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+        if (k === 'unitFee') delete m.fee;
       });
       c.regen = c.regen || [];
       c.regen.forEach((m, i) => {
@@ -5282,7 +5412,7 @@ function openBigCase(id) {
         if (h) h.textContent = labHint(m);
       });
       const sum = loSum(c);
-      $('#lo-sum', sheet).textContent = sum ? `合計 ${sum.toLocaleString()}円` : '';
+      $('#lo-sum', sheet).textContent = sum ? `合計 ${Math.round(sum).toLocaleString()}円` : '';
       $('#bg-calc', sheet).innerHTML = bigCalcHTML(bigCalc(c));
     };
     $$('[data-lo]', sheet).forEach((el) => (el.oninput = el.tagName === 'SELECT' ? null : refreshLo));
@@ -5290,7 +5420,7 @@ function openBigCase(id) {
     $('#lo-add', sheet).onclick = () => {
       sync();
       const last = c.labOrders[c.labOrders.length - 1];
-      c.labOrders.push({ lab: last?.lab || labNames()[0] || '', item: last?.item || '', units: 1, sent: today() });
+      c.labOrders.push({ id: uid(), lab: last?.lab || labNames()[0] || '', item: last?.item || '', units: 1, unitFee: last?.unitFee ?? '', date: today() });
       redraw();
     };
     $$('[data-lodel]', sheet).forEach(
