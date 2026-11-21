@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 55; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 56; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4528,7 +4528,89 @@ function renderBiz(v) {
 
 /* ---------- 大型症例の収支（50万円以上の自費） ---------- */
 // 患者さんの名前は入れない（目印はカルテ番号の下2けたなど）。金額は万円、期間は月。
-const BIG_KINDS = ['全顎矯正', 'インプラント', 'フルマウス', 'その他'];
+const BIG_KINDS = ['全顎矯正', 'インプラント', 'フルマウス', '歯周組織再生療法', 'その他'];
+/* ---------- 歯周組織再生療法：術前と再評価 ---------- */
+// 部位ごとに、骨欠損の形態・術式と材料・術前と再評価のPD/CAL/骨欠損の深さを記録し、改善量を出す。
+const RG_DEFECT = ['1壁性', '2壁性', '3壁性', '複合型', '囲繞性', 'クレーター状', '水平性'];
+const RG_FURC = ['なし', '1度', '2度', '3度'];
+const RG_MAT = ['EMD（エムドゲイン）', 'FGF-2（リグロス）', '骨補填材', '自家骨', '吸収性膜', '非吸収性膜', 'CTG併用'];
+const RG_CAUSES = ['プラークコントロール不良', '喫煙', '咬合性外傷・動揺', '欠損形態が不利', '術式・材料の選択', 'フラップの閉鎖・裂開', 'その他'];
+const rgDiff = (a, b) => (a !== '' && a != null && b !== '' && b != null ? Math.round((Number(a) - Number(b)) * 10) / 10 : null);
+function rgResult(m) {
+  return {
+    pd: rgDiff(m.pd0, m.pd1),
+    cal: rgDiff(m.cal0, m.cal1),
+    bone: rgDiff(m.bone0, m.bone1),
+    months: m.opDate && m.reDate ? monthsBetween(m.opDate, m.reDate) : null,
+  };
+}
+function rgText(m) {
+  const r = rgResult(m);
+  const bits = [];
+  if (r.pd != null) bits.push(`PD ${r.pd > 0 ? '−' : '＋'}${Math.abs(r.pd)}mm`);
+  if (r.cal != null) bits.push(`CAL ${r.cal >= 0 ? '＋' : '−'}${Math.abs(r.cal)}mm 獲得`);
+  if (r.bone != null) bits.push(`骨欠損 ${r.bone >= 0 ? '−' : '＋'}${Math.abs(r.bone)}mm`);
+  if (r.months != null) bits.push(`術後${r.months}か月`);
+  return bits.length ? bits.join(' ・ ') : '再評価の数字を入れると、改善量が出ます';
+}
+function regenHTML(c) {
+  const list = c.regen || [];
+  const sel = (i, k, opts, v, ph) => `<select data-rg="${i}-${k}" class="grow"><option value="">${ph}</option>${opts.map((o) => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+  const num = (i, k, v) => `<input type="number" inputmode="decimal" class="num" style="width:58px" data-rg="${i}-${k}" value="${esc(v ?? '')}">`;
+  return `<div class="card"><h2>歯周組織再生療法：術前と再評価</h2>
+    <p class="muted" style="margin:0">部位ごとに入れます。数字はいちばん深い部位のmm。骨欠損はX線での深さ。</p>
+    ${list
+      .map(
+        (m, i) => `<div class="exercise">
+        <div class="row"><input type="text" data-rg="${i}-site" value="${esc(m.site || '')}" placeholder="部位（例：#36 遠心）" class="grow"><button type="button" class="btn ghost sm" data-rgdel="${i}">✕</button></div>
+        <div class="row small" style="margin-top:6px">欠損 ${sel(i, 'defect', RG_DEFECT, m.defect, '-')} 分岐部 ${sel(i, 'furc', RG_FURC, m.furc, '-')}</div>
+        <h3>術式・材料</h3>${multiHTML('rgm' + i, RG_MAT, m.mats || [])}
+        <table class="biz-t" style="margin-top:6px"><tr><th></th><th>PD</th><th>CAL</th><th>骨欠損</th></tr>
+          <tr><td>術前</td><td>${num(i, 'pd0', m.pd0)}</td><td>${num(i, 'cal0', m.cal0)}</td><td>${num(i, 'bone0', m.bone0)}</td></tr>
+          <tr><td>再評価</td><td>${num(i, 'pd1', m.pd1)}</td><td>${num(i, 'cal1', m.cal1)}</td><td>${num(i, 'bone1', m.bone1)}</td></tr>
+        </table>
+        <div class="row small" style="margin-top:6px">
+          <label class="grow">手術日<input type="date" data-rg="${i}-opDate" value="${esc(m.opDate || '')}"></label>
+          <label class="grow">再評価日<input type="date" data-rg="${i}-reDate" value="${esc(m.reDate || '')}"></label>
+        </div>
+        <p class="small" style="margin:6px 0 0" data-rgh="${i}">${esc(rgText(m))}</p>
+        <details style="margin-top:6px" ${(m.causes || []).length ? 'open' : ''}><summary class="small">思ったほど改善しなかった原因${(m.causes || []).length ? `（${m.causes.length}）` : ''}</summary>
+          ${multiHTML('rgc' + i, RG_CAUSES, m.causes || [])}
+          <input type="text" data-rg="${i}-why" value="${esc(m.why || '')}" placeholder="考察" style="margin-top:6px">
+        </details>
+      </div>`
+      )
+      .join('')}
+    <button type="button" class="btn sub sm" id="rg-add" style="margin-top:8px">＋ 部位を追加</button>
+  </div>`;
+}
+function regenStatsHTML() {
+  const groups = {};
+  for (const c of S.bigcases)
+    for (const m of c.regen || []) {
+      const r = rgResult(m);
+      if (r.pd == null && r.cal == null) continue;
+      for (const key of [`欠損：${m.defect || '不明'}`, ...(m.mats || []).map((x) => `材料：${x}`)]) {
+        groups[key] = groups[key] || { n: 0, pd: [], cal: [] };
+        groups[key].n++;
+        if (r.pd != null) groups[key].pd.push(r.pd);
+        if (r.cal != null) groups[key].cal.push(r.cal);
+      }
+    }
+  const rows = Object.entries(groups);
+  if (!rows.length) return '';
+  const avg = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : '-');
+  const cnt = {};
+  for (const c of S.bigcases) for (const m of c.regen || []) for (const k of m.causes || []) cnt[k] = (cnt[k] || 0) + 1;
+  return `<h3>歯周組織再生療法の実績</h3><table class="biz-t"><tr><th>分け方</th><th>部位</th><th>PD減少</th><th>CAL獲得</th></tr>${rows
+    .map(([k, x]) => `<tr><td>${esc(k)}</td><td>${x.n}</td><td>${avg(x.pd)}mm</td><td>${avg(x.cal)}mm</td></tr>`)
+    .join('')}</table>${
+    Object.keys(cnt).length
+      ? `<p class="small" style="margin:6px 0 0">改善しなかった原因：${Object.entries(cnt).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(k)} ${n}`).join('、')}</p>`
+      : ''
+  }`;
+}
+
 /* ---------- インプラント：骨の状態・術式ごとの期間の予測と実際 ---------- */
 // 1本ごとに、骨質・骨量・術式・初期固定・ISQ と、「埋入から印象まで」の予測と実際を記録する。
 // 終わったものから、術式ごと（骨質別も）の平均期間と予測比を出し、次の予測の目安にする。
@@ -4582,7 +4664,7 @@ function implantsHTML(c) {
         <div class="row"><input type="text" data-im="${i}-site" value="${esc(m.site || '')}" placeholder="部位（例：#36）" class="grow"><button type="button" class="btn ghost sm" data-imdel="${i}">✕</button></div>
         <div class="row" style="margin-top:6px">${sel(i, 'method', IMP_METHODS, m.method, '術式')}</div>
         <div class="row small" style="margin-top:6px">骨質 ${sel(i, 'quality', IMP_QUALITY, m.quality, '-')} 骨量 ${sel(i, 'volume', IMP_VOLUME, m.volume, '-')}</div>
-        <div class="row small" style="margin-top:6px">初期固定 ${num(i, 'torque', m.torque, 'Ncm')} Ncm ・ ISQ 埋入時 ${num(i, 'isq1', m.isq1, '')} 印象前 ${num(i, 'isq2', m.isq2, '')}</div>
+        <div class="row small" style="margin-top:6px">埋入トルク（術直後） ${num(i, 'torque', m.torque, 'Ncm')} Ncm ・ ISQ 埋入時 ${num(i, 'isq1', m.isq1, '')} 印象前 ${num(i, 'isq2', m.isq2, '')}</div>
         <div class="row small" style="margin-top:6px">予測：埋入から印象まで ${num(i, 'planMonths', m.planMonths, 'か月')} か月</div>
         <div class="row small" style="margin-top:6px">
           <label class="grow">埋入日<input type="date" data-im="${i}-placeDate" value="${esc(m.placeDate || '')}"></label>
@@ -4749,7 +4831,7 @@ function bigCasesHTML() {
   }).filter((x) => x.n);
   return `<div class="card">
     <h2>大型症例の収支 <span class="small">${list.length}件</span></h2>
-    <p class="muted" style="margin:0 0 8px">50万円以上の全顎矯正・インプラント・フルマウスなど。名前は入れず、目印（カルテ番号の下2けたなど）で記録します。</p>
+    <p class="muted" style="margin:0 0 8px">50万円以上の全顎矯正・インプラント・フルマウスと、歯周組織再生療法など。名前は入れず、目印（カルテ番号の下2けたなど）で記録します。</p>
     ${
       byKind.length
         ? `<table class="biz-t"><tr><th>種類（完了）</th><th>件数</th><th>利益率</th><th>回数の差</th><th>期間の差</th></tr>${byKind
@@ -4770,6 +4852,7 @@ function bigCasesHTML() {
       .join('')}
     ${moveStatsHTML()}
     ${implantStatsHTML()}
+    ${regenStatsHTML()}
     <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
     ${S.bigcases.some((c) => c.status === 'done') ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
   </div>`;
@@ -4780,7 +4863,7 @@ function bigAskPrompt() {
     .filter((c) => c.status === 'done')
     .map((c) => {
       const x = bigCalc(c);
-      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 初期固定${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}`;
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}${(c.implants || []).length ? `｜インプラント：${c.implants.map((m) => `${m.site || ''} ${m.method || '術式不明'} 骨質${m.quality || '-'}・骨量${m.volume || '-'} 埋入トルク${m.torque || '-'}Ncm ISQ${m.isq1 || '-'}→${m.isq2 || '-'} 予測${m.planMonths || '-'}か月→実際${impActual(m) ?? '-'}か月`).join('、')}` : ''}${(c.regen || []).length ? `｜再生療法：${c.regen.map((m) => `${m.site || ''} ${m.defect || '欠損不明'}${m.furc && m.furc !== 'なし' ? `・分岐部${m.furc}` : ''} ${(m.mats || []).join('+') || '材料不明'} ${rgText(m)}${(m.causes || []).length ? `（原因：${m.causes.join('・')}）` : ''}${m.why ? `［考察：${m.why}］` : ''}`).join('、')}` : ''}`;
     });
   return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
 
@@ -4790,7 +4873,8 @@ function bigAskPrompt() {
 - 技工料・材料費の割合で気になるところ
 - 矯正の歯の移動（種類ごとの1か月あたりの速さ、予測と実際の差）から、次の予測の立て方で気をつけること
 - 予定どおり動かなかった原因（アンカー、メカニクス、干渉、コンプライアンス、局所因子など）の傾向と、次の症例で先回りしてできる対策
-- インプラント（術式・骨質・骨量・初期固定・ISQごとの、埋入から印象までの期間と予測との差）から、次の予測の立て方で気をつけること
+- 歯周組織再生療法（欠損形態・材料ごとのPD減少・CAL獲得、改善しなかった原因）から、症例選択と術式選択で気をつけること
+- インプラント（術式・骨質・骨量・埋入トルク・ISQごとの、埋入から印象までの期間と予測との差）から、次の予測の立て方で気をつけること
 - 次から記録するとよい数字があれば
 
 ■ 完了した症例
@@ -4866,6 +4950,7 @@ function openBigCase(id) {
       </div>
       ${c.kind === '全顎矯正' || (c.moves || []).length ? movesHTML(c) : ''}
       ${c.kind === 'インプラント' || (c.implants || []).length ? implantsHTML(c) : ''}
+      ${c.kind === '歯周組織再生療法' || (c.regen || []).length ? regenHTML(c) : ''}
       <div class="card good" id="bg-calc">${bigCalcHTML(x)}
       </div>
       <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次の見積もりに生かすこと） ${voiceBtn('bg-rev')}</span><textarea id="bg-rev">${esc(c.review || '')}</textarea></label>
@@ -4878,6 +4963,17 @@ function openBigCase(id) {
       $$('[data-bgd]', sheet).forEach((i) => (c[i.dataset.bgd] = i.value));
       c.review = $('#bg-rev', sheet).value;
       c.appliance = picked(sheet, 'bgapp') || c.appliance || '';
+      c.regen = c.regen || [];
+      c.regen.forEach((m, i) => {
+        if ($(`[data-multi="rgm${i}"]`, sheet)) m.mats = readMulti(sheet, 'rgm' + i);
+        if ($(`[data-multi="rgc${i}"]`, sheet)) m.causes = readMulti(sheet, 'rgc' + i);
+      });
+      $$('[data-rg]', sheet).forEach((el) => {
+        const [i, k] = el.dataset.rg.split('-');
+        const m = c.regen[Number(i)];
+        if (!m) return;
+        m[k] = ['pd0', 'pd1', 'cal0', 'cal1', 'bone0', 'bone1'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+      });
       c.implants = c.implants || [];
       $$('[data-im]', sheet).forEach((el) => {
         const [i, k] = el.dataset.im.split('-');
@@ -4946,6 +5042,27 @@ function openBigCase(id) {
       });
     };
     $$('[data-mv]', sheet).forEach((el) => (el.oninput = refreshMoves));
+    const refreshRg = () => {
+      sync();
+      (c.regen || []).forEach((m, i) => {
+        const h = $(`[data-rgh="${i}"]`, sheet);
+        if (h) h.textContent = rgText(m);
+      });
+    };
+    $$('[data-rg]', sheet).forEach((el) => (el.oninput = refreshRg));
+    $('#rg-add', sheet)?.addEventListener('click', () => {
+      sync();
+      c.regen.push({ site: '', defect: '', mats: [] });
+      redraw();
+    });
+    $$('[data-rgdel]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          sync();
+          c.regen.splice(Number(b.dataset.rgdel), 1);
+          redraw();
+        })
+    );
     const refreshImps = () => {
       sync();
       (c.implants || []).forEach((m, i) => {
@@ -4985,8 +5102,8 @@ function openBigCase(id) {
     $('[data-choice="bgkind"]', sheet).addEventListener('click', () => setTimeout(() => {
       const k = picked(sheet, 'bgkind');
       // 全顎矯正なら歯の移動、インプラントならインプラントの欄を出す（入力済みのものは残す）
-      const want = { mv: k === '全顎矯正' || (c.moves || []).length > 0, im: k === 'インプラント' || (c.implants || []).length > 0 };
-      if (want.mv !== !!$('#mv-add', sheet) || want.im !== !!$('#im-add', sheet)) {
+      const want = { mv: k === '全顎矯正' || (c.moves || []).length > 0, im: k === 'インプラント' || (c.implants || []).length > 0, rg: k === '歯周組織再生療法' || (c.regen || []).length > 0 };
+      if (want.mv !== !!$('#mv-add', sheet) || want.im !== !!$('#im-add', sheet) || want.rg !== !!$('#rg-add', sheet)) {
         sync();
         redraw();
       }
