@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 51; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 52; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4605,6 +4605,25 @@ function bigAskPrompt() {
 ${rows.join('\n')}`;
 }
 
+// 見積書・治療計画書の写真から、Claudeのアプリで数字を読み取ってもらう
+const BIG_PROMPT = `この写真は、歯科医院の自費診療の「見積書」または「治療計画書」です。次の項目を読み取って、JSONだけを \`\`\`json のコードブロック1つで出してください。
+・患者さんの氏名・住所・生年月日・電話番号などの個人情報は、絶対に出力しない
+・金額は「万円」の数値（例：55万円→55、1,320,000円→132）。分からない項目は null
+・kind は 全顎矯正／インプラント／フルマウス／その他 のどれか
+・offer は提示（見積）の合計、contract は値引き後や契約の金額が書いてあればその金額（なければ offer と同じ）
+・planVisits は予定の来院回数、planMonths は予定の治療期間（月）
+・lab と material は、技工料・材料費（インプラント体など）が書いてある場合だけ
+・items は治療内容の内訳を短く（例："#36 インプラント 1本 45万"）。氏名は入れない
+{"kind":"","offer":null,"contract":null,"planVisits":null,"planMonths":null,"lab":null,"material":null,"items":[]}`;
+function parseBigReply(text) {
+  const block = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = block ? block[1] : text;
+  const a = body.indexOf('{');
+  const b = body.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error('nojson');
+  return JSON.parse(body.slice(a, b + 1));
+}
+
 function bigCalcHTML(x) {
   return `
         <h2>収支</h2>
@@ -4626,6 +4645,11 @@ function openBigCase(id) {
   const draw = () => {
     const x = bigCalc(c);
     const sheet = openSheet(existing ? '大型症例' : '大型症例を追加', `
+      <div class="card">
+        <h2>見積書・治療計画書の写真から</h2>
+        <p class="muted" style="margin:0 0 8px">① を押してClaudeのアプリに写真と一緒に送り、返事のコード欄をコピーして ② を押すと、金額や見通しが入ります。名前は読み取らないよう頼んであります。</p>
+        <div class="row"><button type="button" class="btn sub grow" id="bg-copy">① 頼む文章をコピー</button><button type="button" class="btn grow" id="bg-paste">② 貼り付ける</button></div>
+      </div>
       <h3>種類</h3>${choicesHTML('bgkind', BIG_KINDS.map((k) => [k, k]), c.kind)}
       <h3>状態</h3>${choicesHTML('bgst', BIG_STATUS, c.status)}
       <label class="field"><span>目印（名前は入れない）</span><input type="text" id="bg-mark" value="${esc(c.mark)}" placeholder="例：カルテ下2けた 36"></label>
@@ -4667,6 +4691,36 @@ function openBigCase(id) {
       $('.sheet').scrollTop = top;
     };
     bindChoices(sheet, 'bgkind', () => {});
+    $('#bg-copy', sheet).onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(BIG_PROMPT);
+        toast('コピーしました。Claudeのアプリに写真と一緒に貼り付けてください', 4000);
+      } catch {
+        toast('自動でコピーできませんでした', 3000);
+      }
+    };
+    $('#bg-paste', sheet).onclick = async () => {
+      let text = '';
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        text = prompt('Claudeの返事を貼り付けてください') || '';
+      }
+      try {
+        const d = parseBigReply(text);
+        sync();
+        if (BIG_KINDS.includes(d.kind)) c.kind = d.kind;
+        const n = (v) => (v == null || v === '' || isNaN(Number(v)) ? null : Number(v));
+        for (const k of ['offer', 'contract', 'planVisits', 'planMonths', 'lab', 'material']) if (n(d[k]) != null) c[k] = n(d[k]);
+        if (c.contract == null || c.contract === '') c.contract = c.offer;
+        const items = (Array.isArray(d.items) ? d.items : []).map(String).filter(Boolean);
+        if (items.length) c.review = [c.review, '【見積の内訳】\n' + items.join('\n')].filter(Boolean).join('\n');
+        redraw();
+        toast('読み取った内容を入れました。確認してください', 3500);
+      } catch {
+        toast('まとめの部分が見つかりませんでした。返事の最後のコード欄をコピーしてください', 5000);
+      }
+    };
     bindChoices(sheet, 'bgst', () => {});
     // 金額を入れたら、その場で収支を計算し直す
     $$('[data-bg], [data-bgd]', sheet).forEach((i) => (i.oninput = () => (sync(), ($('#bg-calc', sheet).innerHTML = bigCalcHTML(bigCalc(c))))));
