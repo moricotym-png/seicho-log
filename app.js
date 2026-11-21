@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 58; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 59; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -3403,6 +3403,7 @@ function openNoteCats() {
 
 /* ========== 写真（症例に付ける。スマホの中だけに保存） ========== */
 const PHOTO_LABELS = ['術前', '術中', '術後', '経過', 'レントゲン', 'CT', '検査表', 'その他'];
+const BIG_PHOTO_LABELS = ['術前', '経過', '術中', '術後', 'レントゲン', 'CT', '口腔内スキャン・模型', '検査表', 'セファロ・分析', 'その他'];
 
 function photoTx(mode, fn) {
   return new Promise((resolve, reject) => {
@@ -3454,15 +3455,15 @@ async function thumbURL(id) {
 }
 
 // 症例の画面の「写真」欄。photos は [{id,label,date}]、onChange で記録側に戻す
-function photoBlockHTML(photos, label) {
+function photoBlockHTML(photos, label, labels = PHOTO_LABELS, note = '写真はこのスマホの中だけに保存します。患者さんの顔や名前が写らないように撮りましょう。') {
   return `<div class="card"><h2>写真 <span class="muted">${photos.length}枚</span></h2>
     <div class="photo-grid">${photos.map((p) => `<button type="button" class="ph" data-ph="${p.id}"><img alt=""><span>${esc(p.label)}・${jpDate(p.date)}</span></button>`).join('')}</div>
-    <h3>種類</h3>${choicesHTML('phlabel', PHOTO_LABELS.map((x) => [x, x]), label)}
+    <h3>種類</h3>${choicesHTML('phlabel', labels.map((x) => [x, x]), label)}
     <div class="row" style="margin-top:8px">
       <label class="btn sub grow" style="text-align:center">📷 撮る<input type="file" accept="image/*" capture="environment" data-phin hidden></label>
       <label class="btn sub grow" style="text-align:center">🖼 選ぶ<input type="file" accept="image/*" multiple data-phin hidden></label>
     </div>
-    <p class="muted">写真はこのスマホの中だけに保存します。患者さんの顔や名前が写らないように撮りましょう。</p></div>`;
+    <p class="muted">${note}</p></div>`;
 }
 function bindPhotoBlock(sheet, owner, photos, onChange) {
   $$('[data-ph]', sheet).forEach(async (b) => {
@@ -3508,7 +3509,7 @@ async function viewPhoto(id, photos, onChange) {
 
 // 保存されずに終わった記録の写真を片付ける
 async function cleanOrphanPhotos() {
-  const owners = new Set([...S.cases.map((c) => c.id), ...S.notes.map((n) => n.id), ...S.papers.map((x) => x.id)]);
+  const owners = new Set([...S.cases.map((c) => c.id), ...S.notes.map((n) => n.id), ...S.papers.map((x) => x.id), ...S.bigcases.map((c) => c.id)]);
   for (const p of await photoAll()) if (!owners.has(p.owner)) await photoDel(p.id);
 }
 
@@ -4581,22 +4582,22 @@ function phaseHint(m) {
 }
 function phasesHTML(c) {
   const list = c.phases || [];
-  const n = (i, k, v, w = 56) => `<input type="number" inputmode="decimal" class="num" style="width:${w}px" data-ph="${i}-${k}" value="${esc(v ?? '')}">`;
+  const n = (i, k, v, w = 56) => `<input type="number" inputmode="decimal" class="num" style="width:${w}px" data-fm="${i}-${k}" value="${esc(v ?? '')}">`;
   return `<div class="card"><h2>フルマウス：段階ごとの見通しと実際</h2>
     <p class="muted" style="margin:0">段階の名前は書きかえられます。いらない段階は ✕ で消してください。</p>
     ${list
       .map(
         (m, i) => `<div class="exercise">
-        <div class="row"><input type="text" data-ph="${i}-name" value="${esc(m.name || '')}" placeholder="段階の名前" class="grow"><button type="button" class="btn ghost sm" data-phdel="${i}">✕</button></div>
+        <div class="row"><input type="text" data-fm="${i}-name" value="${esc(m.name || '')}" placeholder="段階の名前" class="grow"><button type="button" class="btn ghost sm" data-phdel="${i}">✕</button></div>
         <div class="row small" style="margin-top:6px">見通し ${n(i, 'planVisits', m.planVisits)} 回 ${n(i, 'planMonths', m.planMonths)} か月 ・ 実際 ${n(i, 'visits', m.visits)} 回</div>
         <div class="row small" style="margin-top:6px">
-          <label class="grow">開始日<input type="date" data-ph="${i}-start" value="${esc(m.start || '')}"></label>
-          <label class="grow">終了日<input type="date" data-ph="${i}-end" value="${esc(m.end || '')}"></label>
+          <label class="grow">開始日<input type="date" data-fm="${i}-start" value="${esc(m.start || '')}"></label>
+          <label class="grow">終了日<input type="date" data-fm="${i}-end" value="${esc(m.end || '')}"></label>
         </div>
         <p class="muted" style="margin:4px 0 0" data-phh="${i}">${esc(phaseHint(m))}</p>
         <details style="margin-top:6px" ${phLate(m) || (m.causes || []).length ? 'open' : ''}><summary class="small">見通しより長くかかった原因${(m.causes || []).length ? `（${m.causes.length}）` : ''}</summary>
           ${multiHTML('phc' + i, PH_CAUSES, m.causes || [])}
-          <input type="text" data-ph="${i}-why" value="${esc(m.why || '')}" placeholder="考察" style="margin-top:6px">
+          <input type="text" data-fm="${i}-why" value="${esc(m.why || '')}" placeholder="考察" style="margin-top:6px">
         </details>
       </div>`
       )
@@ -5164,7 +5165,7 @@ function bigCasesHTML() {
       .map((c) => {
         const x = bigCalc(c);
         return `<div class="list-item" data-big="${c.id}"><div class="row" style="justify-content:space-between"><b>${esc(c.kind)}${c.mark ? ` <span class="muted">${esc(c.mark)}</span>` : ''}</b>
-          <span class="small">${esc(BIG_STATUS.find((s) => s[0] === c.status)?.[1] || '')}</span></div>
+          <span class="small">${(c.photos || []).length ? `📷${c.photos.length} ` : ''}${esc(BIG_STATUS.find((s) => s[0] === c.status)?.[1] || '')}</span></div>
           <div class="meta">契約${man1(Number(c.contract) || 0)}${x.rate != null && x.cost ? ` ・ 利益${man1(x.profit)}（${Math.round(x.rate * 100)}%）` : ''}${x.visits ? ` ・ ${x.visits}回` : ''}${x.months != null ? ` ・ ${x.months}か月` : ''}</div>
           ${x.visitDiff != null || x.monthDiff != null ? `<div class="meta">見通しとの差：${x.visitDiff != null ? `回数${sign(x.visitDiff)}` : ''}${x.monthDiff != null ? ` 期間${sign(x.monthDiff)}か月` : ''}</div>` : ''}</div>`;
       })
@@ -5276,6 +5277,7 @@ function openBigCase(id) {
       ${c.kind === '歯周組織再生療法' || (c.regen || []).length ? regenHTML(c) : ''}
       ${c.kind === 'フルマウス' || phHas(c) ? phasesHTML(c) : ''}
       ${labOrdersHTML(c)}
+      ${photoBlockHTML(c.photos || [], (c.photos || []).length ? '経過' : '術前', BIG_PHOTO_LABELS, '写真はこのスマホの中だけに保存し、Claudeに頼む文章にも入りません。顔・名前・カルテ番号が写らないように、口の中・レントゲン・模型だけを撮りましょう（レントゲンは名前の欄が入らないように切り取って撮る）。')}
       <div class="card good" id="bg-calc">${bigCalcHTML(x)}
       </div>
       <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次の見積もりに生かすこと） ${voiceBtn('bg-rev')}</span><textarea id="bg-rev">${esc(c.review || '')}</textarea></label>
@@ -5292,8 +5294,8 @@ function openBigCase(id) {
       c.phases.forEach((m, i) => {
         if ($(`[data-multi="phc${i}"]`, sheet)) m.causes = readMulti(sheet, 'phc' + i);
       });
-      $$('[data-ph]', sheet).forEach((el) => {
-        const [i, k] = el.dataset.ph.split('-');
+      $$('[data-fm]', sheet).forEach((el) => {
+        const [i, k] = el.dataset.fm.split('-');
         const m = c.phases[Number(i)];
         if (m) m[k] = ['planVisits', 'planMonths', 'visits'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
       });
@@ -5341,6 +5343,17 @@ function openBigCase(id) {
       $('.sheet').scrollTop = top;
     };
     bindChoices(sheet, 'bgkind', () => {});
+    bindPhotoBlock(sheet, c.id, c.photos || [], (list) => {
+      sync();
+      c.photos = list;
+      // 保存済みの症例なら、写真の増減はすぐ記録に反映する
+      const stored = S.bigcases.find((y) => y.id === c.id);
+      if (stored) {
+        stored.photos = list;
+        save('bigcases');
+      }
+      redraw();
+    });
     $('#bg-copy', sheet).onclick = async () => {
       try {
         await navigator.clipboard.writeText(BIG_PROMPT);
@@ -5391,7 +5404,7 @@ function openBigCase(id) {
         if (h) h.textContent = phaseHint(m);
       });
     };
-    $$('[data-ph]', sheet).forEach((el) => (el.oninput = refreshPh));
+    $$('[data-fm]', sheet).forEach((el) => (el.oninput = refreshPh));
     $('#ph-add', sheet)?.addEventListener('click', () => {
       sync();
       c.phases.push({ name: '' });
@@ -5524,6 +5537,7 @@ function openBigCase(id) {
     $('#bg-del', sheet)?.addEventListener('click', () => {
       if (!confirm('この症例の記録を消しますか？')) return;
       S.bigcases = S.bigcases.filter((y) => y.id !== c.id);
+      (c.photos || []).forEach((ph) => photoDel(ph.id));
       save('bigcases');
       closeSheet();
       render();
