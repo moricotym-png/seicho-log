@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 48; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 49; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -77,6 +77,7 @@ const DEFAULTS = {
     { id: 'l2', name: 'マウスピース矯正のマウスピース', steps: ['設計', 'プリント', '仕上げ'] },
     { id: 'l3', name: 'サージカルステント', steps: ['設計', 'プリント', '仕上げ'] },
     { id: 'l4', name: 'インハウススプリント', steps: ['設計', 'プリント', '仕上げ'] },
+    { id: 'l5', name: 'コンサル用の資料作り', steps: ['写真・資料の準備', '資料作成', '見直し'] },
   ],
   cases: [],
   notes: [],
@@ -4748,6 +4749,13 @@ window.addEventListener('unhandledrejection', (e) => showError('処理', e.reaso
   if (!S.settings.splintSeeded) {
     if (!S.labTypes.some((t) => t.name === 'インハウススプリント')) S.labTypes.push({ id: 'l4', name: 'インハウススプリント', steps: ['設計', 'プリント', '仕上げ'] });
     S.settings.splintSeeded = true;
+    save('labTypes');
+    save('settings');
+  }
+  // 院内技工の種類に「コンサル用の資料作り」を足す（すでに使っている人にも1回だけ）
+  if (!S.settings.consultDocSeeded) {
+    if (!S.labTypes.some((t) => t.name === 'コンサル用の資料作り')) S.labTypes.push({ id: 'l5', name: 'コンサル用の資料作り', steps: ['写真・資料の準備', '資料作成', '見直し'] });
+    S.settings.consultDocSeeded = true;
     save('labTypes');
     save('settings');
   }
