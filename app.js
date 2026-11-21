@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 52; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 53; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -4529,6 +4529,99 @@ function renderBiz(v) {
 /* ---------- 大型症例の収支（50万円以上の自費） ---------- */
 // 患者さんの名前は入れない（目印はカルテ番号の下2けたなど）。金額は万円、期間は月。
 const BIG_KINDS = ['全顎矯正', 'インプラント', 'フルマウス', 'その他'];
+/* ---------- 矯正の移動量：予測と実際 ---------- */
+// 1つの症例に、歯の動き（例：上顎大臼歯の遠心移動 3mm）を並べ、予測の期間と実際の期間を記録する。
+// 終わった動きから「1か月あたりの移動量」を出し、次の予測の目安にする。
+const MOVE_TYPES = [
+  ['遠心移動', 'mm'],
+  ['近心移動', 'mm'],
+  ['前歯の後退', 'mm'],
+  ['圧下', 'mm'],
+  ['挺出', 'mm'],
+  ['拡大', 'mm'],
+  ['回転', '°'],
+  ['傾斜の改善', '°'],
+  ['トルク', '°'],
+  ['その他', 'mm'],
+];
+const APPLIANCES = ['ワイヤー', 'マウスピース'];
+const moveUnit = (t) => MOVE_TYPES.find((x) => x[0] === t)?.[1] || 'mm';
+// 終わった動きの記録から、種類（と装置）ごとの平均速度
+function moveRates() {
+  const out = {};
+  for (const c of S.bigcases)
+    for (const m of c.moves || []) {
+      const amt = Number(m.actual) || Number(m.plan);
+      const mo = Number(m.actualMonths);
+      if (!amt || !mo) continue;
+      for (const key of [m.type, `${m.type}|${c.appliance || ''}`]) {
+        out[key] = out[key] || { amt: 0, mo: 0, n: 0, ratios: [] };
+        out[key].amt += amt;
+        out[key].mo += mo;
+        out[key].n++;
+        if (Number(m.planMonths)) out[key].ratios.push(mo / Number(m.planMonths));
+      }
+    }
+  return out;
+}
+function moveHint(m, appliance) {
+  const r = moveRates();
+  const own = r[`${m.type}|${appliance || ''}`];
+  const base = own && own.n ? own : r[m.type];
+  const u = moveUnit(m.type);
+  const bits = [];
+  if (base && base.n) {
+    const rate = base.amt / base.mo;
+    bits.push(`これまで${base.n}件の平均 ${Math.round(rate * 100) / 100}${u}/月${own && own.n ? `（${appliance}）` : ''}`);
+    if (Number(m.plan)) bits.push(`→ ${m.plan}${u}なら約${Math.round((Number(m.plan) / rate) * 10) / 10}か月`);
+    if (base.ratios.length) {
+      const avg = base.ratios.reduce((a, b) => a + b, 0) / base.ratios.length;
+      bits.push(`予測に対して実際は平均${Math.round(avg * 100)}%`);
+    }
+  } else bits.push('まだ過去の記録がありません。終わったら実際の量と期間を入れると、次から目安が出ます');
+  if (Number(m.actual || m.plan) && Number(m.actualMonths)) bits.push(`この症例：${Math.round((Number(m.actual || m.plan) / Number(m.actualMonths)) * 100) / 100}${u}/月`);
+  if (Number(m.planMonths) && Number(m.actualMonths)) {
+    const d = Math.round((Number(m.actualMonths) - Number(m.planMonths)) * 10) / 10;
+    bits.push(`予測との差 ${d > 0 ? '＋' : ''}${d}か月`);
+  }
+  return bits.join(' ・ ');
+}
+function movesHTML(c) {
+  const moves = c.moves || [];
+  return `<div class="card"><h2>歯の移動：予測と実際</h2>
+    <h3>装置</h3>${choicesHTML('bgapp', APPLIANCES.map((a) => [a, a]), c.appliance || null)}
+    <p class="muted" style="margin:6px 0 0">術前の分析で決めた動きを1つずつ入れます（例：上顎両側6 の遠心移動 3mm）。終わったら実際の量と期間を入れてください。</p>
+    ${moves
+      .map(
+        (m, i) => `<div class="exercise">
+        <div class="row">
+          <select data-mv="${i}-type" class="grow">${MOVE_TYPES.map(([t]) => `<option ${t === m.type ? 'selected' : ''}>${t}</option>`).join('')}</select>
+          <input type="text" data-mv="${i}-where" value="${esc(m.where || '')}" placeholder="部位（例：上顎両側6）" class="grow">
+          <button type="button" class="btn ghost sm" data-mvdel="${i}">✕</button>
+        </div>
+        <div class="row small" style="margin-top:6px">予測 <input type="number" inputmode="decimal" class="num" data-mv="${i}-plan" value="${esc(m.plan ?? '')}"> <span data-mvu="${i}">${moveUnit(m.type)}</span> を
+          <input type="number" inputmode="decimal" class="num" data-mv="${i}-planMonths" value="${esc(m.planMonths ?? '')}"> か月</div>
+        <div class="row small" style="margin-top:4px">実際 <input type="number" inputmode="decimal" class="num" data-mv="${i}-actual" value="${esc(m.actual ?? '')}" placeholder="量"> <span data-mvu="${i}">${moveUnit(m.type)}</span> を
+          <input type="number" inputmode="decimal" class="num" data-mv="${i}-actualMonths" value="${esc(m.actualMonths ?? '')}" placeholder="期間"> か月</div>
+        <p class="muted" style="margin:4px 0 0" data-mvh="${i}">${esc(moveHint(m, c.appliance))}</p>
+      </div>`
+      )
+      .join('')}
+    <button type="button" class="btn sub sm" id="mv-add" style="margin-top:8px">＋ 動きを追加</button>
+  </div>`;
+}
+function moveStatsHTML() {
+  const r = moveRates();
+  const rows = MOVE_TYPES.map(([t, u]) => [t, u, r[t]]).filter((x) => x[2]?.n);
+  if (!rows.length) return '';
+  return `<h3>歯の移動の実績（1か月あたり）</h3><table class="biz-t"><tr><th>動き</th><th>件数</th><th>平均の速さ</th><th>予測比</th></tr>${rows
+    .map(([t, u, x]) => {
+      const avg = x.ratios.length ? Math.round((x.ratios.reduce((a, b) => a + b, 0) / x.ratios.length) * 100) + '%' : '-';
+      return `<tr><td>${t}</td><td>${x.n}</td><td>${Math.round((x.amt / x.mo) * 100) / 100}${u}/月</td><td>${avg}</td></tr>`;
+    })
+    .join('')}</table><p class="muted" style="margin:4px 0 8px">予測比＝実際の期間 ÷ 予測の期間。100%より大きいと、予測より時間がかかっています。</p>`;
+}
+
 const BIG_STATUS = [['contract', '契約済み'], ['treat', '治療中'], ['done', '完了']];
 const monthsBetween = (a, b) => (a && b ? Math.round((daysBetween(a, b) / 30.4) * 10) / 10 : null);
 function bigCalc(c) {
@@ -4581,6 +4674,7 @@ function bigCasesHTML() {
           ${x.visitDiff != null || x.monthDiff != null ? `<div class="meta">見通しとの差：${x.visitDiff != null ? `回数${sign(x.visitDiff)}` : ''}${x.monthDiff != null ? ` 期間${sign(x.monthDiff)}か月` : ''}</div>` : ''}</div>`;
       })
       .join('')}
+    ${moveStatsHTML()}
     <button class="btn sub wide" id="big-add" style="margin-top:8px">＋ 大型症例を追加</button>
     ${done.length ? '<button class="btn ghost wide" id="big-ask" style="margin-top:8px">完了した症例のふりかえりをClaudeに頼む文章をコピー</button>' : ''}
   </div>`;
@@ -4591,7 +4685,7 @@ function bigAskPrompt() {
     .filter((c) => c.status === 'done')
     .map((c) => {
       const x = bigCalc(c);
-      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}`;
+      return `${c.kind}｜提示${c.offer || '-'}万・契約${c.contract || '-'}万｜保険${c.insPoints || 0}点｜技工${c.lab || 0}万・材料${c.material || 0}万・その他${c.otherCost || 0}万｜利益${man1(x.profit)}（${x.rate != null ? Math.round(x.rate * 100) : '-'}%）｜回数 見通し${c.planVisits || '-'}→実際${x.visits || '-'}｜期間 見通し${c.planMonths || '-'}か月→実際${x.months ?? '-'}か月｜チェア${c.chairHours || '-'}時間${x.perHour != null ? `（1時間あたり${man1(x.perHour)}）` : ''}${c.review ? `｜メモ：${c.review}` : ''}${(c.moves || []).length ? `｜移動（${c.appliance || '装置不明'}）：${c.moves.map((m) => `${m.where || ''}${m.type} 予測${m.plan || '-'}${moveUnit(m.type)}/${m.planMonths || '-'}か月→実際${m.actual || '-'}${moveUnit(m.type)}/${m.actualMonths || '-'}か月`).join('、')}` : ''}`;
     });
   return `歯科医院の院長です。50万円以上の自費の大型症例（全顎矯正・インプラント・フルマウス）の収支をふりかえりたいです。患者さんが特定できる情報は含めていません。
 
@@ -4599,6 +4693,7 @@ function bigAskPrompt() {
 - 種類ごとに、利益率と、見通しと実際の差（回数・期間）の傾向を読み取ってください
 - 料金設定や見積もり（回数・期間の見通し）で、見直したほうがよさそうな点を具体的に
 - 技工料・材料費の割合で気になるところ
+- 矯正の歯の移動（種類ごとの1か月あたりの速さ、予測と実際の差）から、次の予測の立て方で気をつけること
 - 次から記録するとよい数字があれば
 
 ■ 完了した症例
@@ -4672,6 +4767,7 @@ function openBigCase(id) {
         </div>
         ${!c.visitDates.length ? `<div class="row" style="margin-top:6px">${num('visits', 'まとめて入れる場合の回数', '回')}</div>` : ''}
       </div>
+      ${c.kind === '全顎矯正' || (c.moves || []).length ? movesHTML(c) : ''}
       <div class="card good" id="bg-calc">${bigCalcHTML(x)}
       </div>
       <label class="field"><span class="row" style="justify-content:space-between">ふりかえり（うまくいった点・次の見積もりに生かすこと） ${voiceBtn('bg-rev')}</span><textarea id="bg-rev">${esc(c.review || '')}</textarea></label>
@@ -4683,6 +4779,14 @@ function openBigCase(id) {
       $$('[data-bg]', sheet).forEach((i) => (c[i.dataset.bg] = i.value === '' ? '' : Number(i.value)));
       $$('[data-bgd]', sheet).forEach((i) => (c[i.dataset.bgd] = i.value));
       c.review = $('#bg-rev', sheet).value;
+      c.appliance = picked(sheet, 'bgapp') || c.appliance || '';
+      c.moves = c.moves || [];
+      $$('[data-mv]', sheet).forEach((el) => {
+        const [i, k] = el.dataset.mv.split('-');
+        const m = c.moves[Number(i)];
+        if (!m) return;
+        m[k] = ['plan', 'planMonths', 'actual', 'actualMonths'].includes(k) ? (el.value === '' ? '' : Number(el.value)) : el.value;
+      });
       if (c.status === 'done' && c.start && !c.end) c.end = today();
     };
     const redraw = () => {
@@ -4724,6 +4828,40 @@ function openBigCase(id) {
     bindChoices(sheet, 'bgst', () => {});
     // 金額を入れたら、その場で収支を計算し直す
     $$('[data-bg], [data-bgd]', sheet).forEach((i) => (i.oninput = () => (sync(), ($('#bg-calc', sheet).innerHTML = bigCalcHTML(bigCalc(c))))));
+    // 移動量の入力：目安の文だけ書き換える（キーボードが閉じないように）
+    const refreshMoves = () => {
+      sync();
+      (c.moves || []).forEach((m, i) => {
+        const h = $(`[data-mvh="${i}"]`, sheet);
+        if (h) h.textContent = moveHint(m, c.appliance);
+        $$(`[data-mvu="${i}"]`, sheet).forEach((u) => (u.textContent = moveUnit(m.type)));
+      });
+    };
+    $$('[data-mv]', sheet).forEach((el) => (el.oninput = refreshMoves));
+    bindChoices(sheet, 'bgapp', refreshMoves);
+    $('#mv-add', sheet)?.addEventListener('click', () => {
+      sync();
+      c.moves.push({ type: '遠心移動', where: '', plan: '', planMonths: '' });
+      redraw();
+    });
+    $$('[data-mvdel]', sheet).forEach(
+      (b) =>
+        (b.onclick = () => {
+          sync();
+          c.moves.splice(Number(b.dataset.mvdel), 1);
+          redraw();
+        })
+    );
+    // 種類を全顎矯正にしたら、移動量の欄を出す
+    $('[data-choice="bgkind"]', sheet).addEventListener('click', () => setTimeout(() => {
+      const ortho = picked(sheet, 'bgkind') === '全顎矯正';
+      const shown = !!$('#mv-add', sheet);
+      // 全顎矯正にしたら出し、ほかの種類にしたら（動きを入れていなければ）隠す
+      if (ortho !== shown) {
+        sync();
+        if (ortho || !(c.moves || []).length) redraw();
+      }
+    }));
     $('#bg-plus', sheet).onclick = () => {
       sync();
       if (!c.visitDates.length && Number(c.visits)) c.visitDates = Array(Number(c.visits)).fill(c.start || today());
