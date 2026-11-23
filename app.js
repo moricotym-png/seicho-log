@@ -1,5 +1,5 @@
 'use strict';
-const APP_VERSION = 59; // sw.js の CACHE の番号とそろえる
+const APP_VERSION = 60; // sw.js の CACHE の番号とそろえる
 // 成長ログ（第1段階）
 // 記録はすべてこのスマホの中（IndexedDB）に保存する。外には送らない。
 
@@ -1840,10 +1840,14 @@ function renderReview(v) {
           if (r) dots.push(`本${r}`);
           if (dd.diary) dots.push('📔');
           if (dd.dawdle === 'lots') dots.push('📱');
+          const lj = S.labs.filter((j) => j.finished === d).length;
+          if (lj) dots.push(`🦷${lj}`);
+          const ch = S.chores.filter((c) => c.done === d).length;
+          if (ch) dots.push(`✓${ch}`);
           return `<div class="d${d === t ? ' today' : ''}"><div>${WD[parseYmd(d).getDay()]}</div><div class="dots">${dots.join('<br>')}</div></div>`;
         })
         .join('')}</div>
-      <p class="muted" style="margin:8px 0 0">💪筋トレ 🍺飲み会 英=英語(分) 本=読書(分) 📔日記 📱だらだら多め</p>
+      <p class="muted" style="margin:8px 0 0">💪筋トレ 🍺飲み会 英=英語(分) 本=読書(分) 📔日記 📱だらだら多め 🦷院内技工の完成 ✓雑務を終えた件数</p>
     </div>
     <div class="card">
       <h2>この週のまとめ</h2>
@@ -1862,6 +1866,7 @@ function renderReview(v) {
         <div class="stat"><div class="v">${days.some((x) => S.days[x]?.blog) ? '✓' : '—'}</div><div class="l">ブログの投稿（週1回）</div></div>
       </div>
     </div>
+    ${weekWorkHTML(ws, we)}
     ${afterDrinkHTML()}`;
   $$('[data-wk]', v).forEach((b) =>
     b.addEventListener('click', () => {
@@ -1869,6 +1874,53 @@ function renderReview(v) {
       render();
     })
   );
+}
+
+// 振り返り：その週の院内技工と雑務
+function weekWorkHTML(ws, we) {
+  const inW = (d) => d && d >= ws && d <= we;
+  const end = we < today() ? we : today();
+  // 院内技工
+  const fin = S.labs.filter((j) => inW(j.finished));
+  const got = S.labs.filter((j) => inW(j.ordered));
+  const sec = S.labs.reduce((a, j) => a + (j.sessions || []).filter((x) => inW(x.date)).reduce((b, x) => b + sessSec(x), 0), 0);
+  const left = S.labs.filter((j) => j.ordered && j.ordered <= end && (!j.finished || j.finished > end));
+  const stale = left.filter((j) => (!j.started || j.started > end) && daysBetween(j.ordered, end) >= LAB_LATE);
+  const byType = {};
+  for (const j of fin) byType[labTypeName(j)] = (byType[labTypeName(j)] || 0) + 1;
+  const toFin = fin.map((j) => daysBetween(j.ordered, j.finished));
+  const avg = (a) => (a.length ? Math.round((a.reduce((x, y) => x + y, 0) / a.length) * 10) / 10 : null);
+  // 雑務
+  const done = S.chores.filter((c) => inW(c.done));
+  const late = done.filter((c) => c.due && c.done > c.due);
+  const spans = done.map((c) => Math.max(0, daysBetween(choreAdded(c), c.done)));
+  const openAt = S.chores.filter((c) => choreAdded(c) <= end && (!c.done || c.done > end));
+  const overAt = openAt.filter((c) => c.due && c.due < end);
+  const prevDone = S.chores.filter((c) => c.done && c.done >= addDays(ws, -7) && c.done <= addDays(we, -7)).length;
+  const prevFin = S.labs.filter((j) => j.finished && j.finished >= addDays(ws, -7) && j.finished <= addDays(we, -7)).length;
+  const diff = (n, p) => (n - p ? `<span class="small">（前の週${n - p > 0 ? '＋' : ''}${n - p}）</span>` : '');
+  // 外注のセラミック
+  const cer = allLabOrders().filter((m) => inW(loDate(m)) && LO_CERAMIC(m.item)).reduce((a, m) => a + (Number(m.units) || 1), 0);
+  return `<div class="card">
+    <h2>仕事の処理</h2>
+    <h3>🦷 院内技工</h3>
+    <div class="stats">
+      <div class="stat"><div class="v">${fin.length}件${diff(fin.length, prevFin)}</div><div class="l">完成</div></div>
+      <div class="stat"><div class="v">${got.length}件</div><div class="l">受注</div></div>
+      <div class="stat"><div class="v">${sec ? secLabel(sec) : '-'}</div><div class="l">作業時間</div></div>
+      <div class="stat"><div class="v" style="color:${stale.length ? 'var(--warn)' : 'inherit'}">${left.length}件</div><div class="l">週末の残り${stale.length ? `（うち${LAB_LATE}日以上手つかず${stale.length}）` : ''}</div></div>
+    </div>
+    ${fin.length ? `<p class="small" style="margin:6px 0 0">${Object.entries(byType).map(([k, n]) => `${esc(k)} ${n}`).join('・')}${avg(toFin) != null ? ` ・ 受注から完成まで平均${avg(toFin)}日` : ''}</p>` : ''}
+    <h3>✓ 雑務</h3>
+    <div class="stats">
+      <div class="stat"><div class="v">${done.length}件${diff(done.length, prevDone)}</div><div class="l">終えた</div></div>
+      <div class="stat"><div class="v">${avg(spans) ?? '-'}日</div><div class="l">追加から終えるまで</div></div>
+      <div class="stat"><div class="v">${late.length}件</div><div class="l">期限に遅れて終えた</div></div>
+      <div class="stat"><div class="v" style="color:${overAt.length ? 'var(--warn)' : 'inherit'}">${overAt.length}件</div><div class="l">週末に期限切れで残った</div></div>
+    </div>
+    ${done.length ? `<p class="small" style="margin:6px 0 0">${Object.entries(done.reduce((o, c) => ((o[c.cat || 'その他'] = (o[c.cat || 'その他'] || 0) + 1), o), {})).map(([k, n]) => `${esc(k)} ${n}`).join('・')}</p>` : ''}
+    ${cer ? `<h3>外注のセラミック</h3><p class="small" style="margin:0">${cer}本入りました</p>` : ''}
+  </div>`;
 }
 
 // 飲み会の翌日と、それ以外の日の比べっこ（直近60日）
@@ -4711,7 +4763,7 @@ function labWeekHTML() {
     ${rows
       .map(
         (x) => `<div style="margin-bottom:8px"><div class="row small" style="justify-content:space-between"><span>${x.ws === thisWeek ? '今週' : md(x.ws) + '〜'}</span><b>${x.n}本</b></div>
-        <div class="dbars"><div class="dbar" style="width:${Math.round((x.n / max) * 100)}%"></div></div>
+        <div class="meter" style="margin:2px 0"><i style="width:${Math.round((x.n / max) * 100)}%"></i></div>
         ${x.n ? `<div class="muted small">${Object.entries(x.by).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${esc(k)} ${n}`).join('・')}　／　${Object.entries(x.labBy).map(([k, n]) => `${esc(k)} ${n}`).join('・')}${x.fee ? `　技工料 ${Math.round(x.fee / 1000) / 10}万円` : ''}</div>` : ''}</div>`
       )
       .join('')}
